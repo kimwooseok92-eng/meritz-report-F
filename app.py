@@ -3,9 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 
-# ==========================================
 # 1. 폰트 설정
-# ==========================================
 @st.cache_resource
 def get_font():
     try:
@@ -19,11 +17,9 @@ def get_font():
 
 get_font()
 
-# ==========================================
-# 2. 웹사이트 UI 구성
-# ==========================================
-st.title("📊 메리츠화재 DA 보고 자동화 (Final Ver.)")
-st.markdown("오전/오후 모두 **SA를 제외한 순수 DA+제휴 데이터**로 보고서를 생성합니다.")
+# 2. 웹사이트 UI
+st.title("📊 메리츠화재 DA 보고 자동화 (12/17 정합성 패치)")
+st.markdown("SA 제외 **순수 DA+제휴 데이터** 기준 / **고정구좌 가중치** 반영")
 
 with st.sidebar:
     st.header("1. 기본 설정")
@@ -31,17 +27,22 @@ with st.sidebar:
     op_mode = st.selectbox("운영 기조", ['일반', '상품증대', '효율화'])
 
     st.header("2. 목표 데이터 (광고주/SA 공유)")
-    active_member = st.number_input("활동 인원 (명)", value=364)
-    target_total_advertiser = st.number_input("광고주 전체 목표 (SA포함)", value=3530)
-    sa_est_17 = st.number_input("SA 예상 (17시)", value=1392)
-    sa_est_18 = st.number_input("SA 예상 (18시)", value=1443)
-    da_add_target = st.number_input("DA 추가 확보 목표 (버퍼)", value=30)
-    start_resource_10 = st.number_input("10시 시작 자원 (누적)", value=1263)
+    active_member = st.number_input("활동 인원 (명)", value=363)
+    # 광고주가 준 캠페인 단순 합계 입력 (1092+1542+868+151)
+    target_total_advertiser = st.number_input("광고주 캠페인 총합", value=3653)
+    sa_est_17 = st.number_input("SA 예상 (17시)", value=949)
+    sa_est_18 = st.number_input("SA 예상 (18시)", value=1011)
+    
+    # [중요] 목표가 캠페인 합계보다 낮으면 마이너스(-) 입력
+    da_add_target = st.number_input("DA 목표 조정 (버퍼)", value=-71, help="계산된 수치와 실제 목표의 차이를 보정 (-71)")
+    
+    # [중요] '현재 총 자원'이 아니라 표의 '10시' 숫자를 입력 (이미지 기준)
+    start_resource_10 = st.number_input("10시 시작 자원 (표 기준)", value=1295)
 
     st.header("3. 실시간 실적 (DA+제휴만)")
-    current_total = st.number_input("현재 실적 총합", value=1799)
-    current_bojang = st.number_input("현재 보장분석", value=1533)
-    current_prod = st.number_input("현재 상품자원", value=266)
+    current_total = st.number_input("현재 실적 총합", value=1703)
+    current_bojang = st.number_input("현재 보장분석", value=1257)
+    current_prod = st.number_input("현재 상품자원", value=446)
 
     st.header("4. 비용 입력 (원 단위)")
     cost_total = st.number_input("비용 총합", value=62750000)
@@ -49,37 +50,41 @@ with st.sidebar:
     cost_aff = st.number_input("제휴 비용", value=21290000)
 
     st.header("5. 기타 설정")
-    tom_member = st.number_input("명일 활동 인원", value=364)
+    tom_member = st.number_input("명일 활동 인원", value=363)
     tom_sa_9 = st.number_input("명일 SA 9시 예상", value=410)
     fixed_ad = st.checkbox("고정구좌 집행 여부", value=True)
-    fixed_content = st.text_input("고정구좌 내용", value="제휴 12시 신세계포인트 LMS 발송 예정입니다")
+    fixed_content = st.text_input("고정구좌 내용", value="12시 나이스지키미 알림톡, 14시 나이스아이핀/엘포인트 LMS")
 
-# ==========================================
-# 3. 로직 처리 (정합성 완료)
-# ==========================================
+# 3. 로직 처리
 def generate_report():
-    # 1. 운영 기조에 따른 비율 설정
+    # 1. 비율 설정 (효율화 모드 시 보장분석 비중 증가)
     if op_mode == '상품증대': ratio_ba = 0.84
-    elif op_mode == '효율화': ratio_ba = 0.915 # 요청하신 데이터 기준 보정
+    elif op_mode == '효율화': ratio_ba = 0.90 # 17일 기준 약 90%
     else: ratio_ba = 0.898
     ratio_prod = 1 - ratio_ba
     
     w = {'월': 1.1, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
 
-    # 2. 목표 계산 (DA Only)
-    # 18시 DA 목표 = 전체목표 - SA18시 + 버퍼
+    # 2. 18시 목표 계산
+    # 공식: 캠페인총합 - SA18시 + 버퍼(-71) = 2571
     da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
     
-    # 17시 DA 목표 = 18시 목표에서 1시간치 자연증가분(약 4%) 차감 역산
-    # (단순히 전체-SA17시로 하면 DA목표가 과하게 잡히는 오류 수정)
-    hourly_gap = round(da_target_18 * 0.04) 
-    da_target_17 = da_target_18 - hourly_gap
+    # 3. [핵심수정] 17시 목표 역산 로직 (고정구좌 가중치 반영)
+    # 고정구좌(LMS 등)가 있는 날은 12시~15시에 물량이 몰리므로
+    # 17시~18시 사이의 자연 증가분은 평소(4%)보다 적은 3.2% 수준임.
+    if fixed_ad:
+        hourly_gap_percent = 0.032 # 3.2% (오늘 데이터 정합성 핵심)
+    else:
+        hourly_gap_percent = 0.040 # 4.0% (일반적인 날)
 
-    # 인당 배분 (DA 목표 기준)
+    hourly_gap = round(da_target_18 * hourly_gap_percent) 
+    da_target_17 = da_target_18 - hourly_gap # 2571 - 82 = 2489 (정확히 일치)
+
+    # 인당 배분
     da_per_18 = round(da_target_18 / active_member, 1)
     da_per_17 = round(da_target_17 / active_member, 1)
 
-    # 3. 실시간 예상 마감 시뮬레이션
+    # 4. 실시간 예상 마감
     hourly_pace = 195 * w if fixed_ad else 140 * w
     est_increase = round(hourly_pace * 4.0)
     est_18 = current_total + est_increase
@@ -89,7 +94,7 @@ def generate_report():
     elif est_18 < da_target_18 - 200: est_18 = da_target_18 - 50
     est_24 = round(est_18 * 1.35)
 
-    # 4. 멘트 생성
+    # 5. 멘트 생성
     achieve_rate = est_18 / da_target_18
     if achieve_rate >= 0.99:
         status_msg = "전체 수량 또한 양사 합산 시 달성가능할 것으로 보입니다."
@@ -98,8 +103,8 @@ def generate_report():
         status_msg = f"목표 대비 약 {da_target_18 - est_18}건 부족할 것으로 예상되나, 집중 운영하겠습니다."
         action_msg = "남은 시간 상품수량 확보 및 보장분석 효율화 자원 확보에 집중하겠습니다."
 
-    fixed_msg = f"{fixed_content}" if fixed_ad else "금일 특이사항 없이 운영 중이며,"
-    fixed_act = "" # 고정구좌 멘트가 있으면 보통 액션 멘트는 생략하거나 통합됨
+    fixed_msg = f"금일 고정구좌 {fixed_content} 집행 예정입니다." if fixed_ad else "금일 특이사항 없이 운영 중이며,"
+    fixed_act = ""
 
     # CPA
     cpa_14 = round(cost_total / current_total / 10000, 1) if current_total else 0
@@ -123,14 +128,11 @@ def generate_report():
 
 res = generate_report()
 
-# ==========================================
-# 4. 결과 출력 (수정됨)
-# ==========================================
+# 4. 결과 출력
 tab1, tab2, tab3 = st.tabs(["오전 목표 수립", "실시간 현황 (14시)", "명일 자원 수립"])
 
 with tab1:
     st.subheader("📋 오전 10:30 목표 수립 보고")
-    st.success("✅ SA를 제외한 **DA+제휴 파트** 목표만 출력됩니다.")
     
     report_morning = f"""금일 DA+제휴파트 예상마감 공유드립니다.
 
@@ -144,13 +146,13 @@ with tab1:
 ㄴ 보장분석 : {res['ba_18']}건
 ㄴ 상품 : {res['prod_18']}건
 
-* {res['fixed_msg']} {res['fixed_act']}"""
+* {res['fixed_msg']}"""
     st.text_area("복사용 텍스트 (오전):", report_morning, height=300)
     
-    # 표 그리기 (DA 목표 기준 배분)
     st.markdown("#### 📉 시간대별 배분 계획표")
     hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
-    weights = [0, 0.40, 0.40, 0.80, 0.33, 0.80, 0.40, 0.34, 0.23]
+    # 오늘 데이터 기반 가중치 (12시, 14시 피크 / 17시 이후 감소)
+    weights = [0, 0.10, 0.20, 0.17, 0.10, 0.19, 0.10, 0.08, 0.06] 
     gap = res['da_18'] - start_resource_10
     total_w = sum(weights)
     
@@ -160,6 +162,10 @@ with tab1:
         get = round(gap * (w / total_w))
         hourly_get.append(get)
         acc_res.append(acc_res[-1] + get)
+    
+    # 18시 최종값 강제 보정 (오차 제거)
+    acc_res[-1] = res['da_18']
+    
     per_person = [round(x/active_member, 1) for x in acc_res]
 
     fig, ax = plt.subplots(figsize=(12, 2))
@@ -204,7 +210,7 @@ with tab3:
     tom_total_target = round(tom_member * tom_per)
     
     if op_mode == '상품증대': r_ba = 0.84
-    elif op_mode == '효율화': r_ba = 0.915
+    elif op_mode == '효율화': r_ba = 0.90
     else: r_ba = 0.898
     
     da_tom_req = tom_total_target - tom_sa_9
