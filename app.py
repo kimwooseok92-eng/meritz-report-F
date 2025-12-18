@@ -18,7 +18,7 @@ def get_font():
 get_font()
 
 # 2. 웹사이트 UI
-st.title("📊 메리츠화재 DA 보고 자동화 (Time-Slot 패치)")
+st.title("📊 메리츠화재 DA 보고 자동화 (에러 수정판)")
 st.markdown("**발송 시간대별(12시/14시) 정밀 가중치** 적용 완료")
 
 with st.sidebar:
@@ -40,7 +40,6 @@ with st.sidebar:
 
     st.header("3. 실시간 실적 (DA+제휴만)")
     current_total = st.number_input("현재 실적 총합", value=1852)
-    # 14시 기준 실적 입력 (없으면 추정치)
     current_bojang = st.number_input("현재 보장분석", value=1286)
     current_prod = st.number_input("현재 상품자원", value=566)
 
@@ -53,7 +52,7 @@ with st.sidebar:
     tom_member = st.number_input("명일 활동 인원", value=361)
     tom_sa_9 = st.number_input("명일 SA 9시 예상", value=410)
     
-    # [NEW] 고정구좌 발송 시간 선택 기능
+    # 고정구좌 발송 시간 선택 기능
     fixed_ad_type = st.radio("고정구좌 발송 시간", ["없음", "12시 Only", "14시 Only", "12시+14시 Both"])
     fixed_content = st.text_input("고정구좌 내용", value="14시 카카오페이 TMS 발송 예정입니다")
 
@@ -69,13 +68,13 @@ def generate_report():
     # 목표 계산
     da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
     
-    # [핵심] 발송 타입별 17시 목표 역산 비율 (자연 증가분)
+    # 발송 타입별 17시 목표 역산 비율
     if fixed_ad_type == "없음":
-        gap_percent = 0.040 # 평시
+        gap_percent = 0.040 
     elif fixed_ad_type == "14시 Only":
-        gap_percent = 0.033 # 15시에 몰리고 17-18시는 둔화
+        gap_percent = 0.033 
     else:
-        gap_percent = 0.032 # 12시, Both 포함
+        gap_percent = 0.032 
 
     hourly_gap = round(da_target_18 * gap_percent) 
     da_target_17 = da_target_18 - hourly_gap 
@@ -84,7 +83,6 @@ def generate_report():
     da_per_17 = round(da_target_17 / active_member, 1)
 
     # 실시간 예상 마감 시뮬레이션
-    # 오늘 같은 날은 14시 이후 폭증하므로 pace를 높게 잡음
     if fixed_ad_type == "14시 Only":
         base_pace = 210
     elif fixed_ad_type == "없음":
@@ -151,24 +149,15 @@ with tab1:
     st.text_area("복사용 텍스트 (오전):", report_morning, height=300)
     
     st.markdown("#### 📉 시간대별 배분 계획표")
-    
-    # [핵심] 선택한 발송 타입에 따른 동적 가중치 할당
     hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
     
     if fixed_ad_type == "14시 Only":
-        # 오늘(12/18) 패턴: 14시까지 일정하다가 15시에 폭발 (image_b0ad45 반영)
-        # 비율: 0.11(평) -> 0.28(피크) -> 0.08(감소)
         weights = [0, 0.11, 0.11, 0.11, 0.11, 0.28, 0.10, 0.10, 0.08]
-        
     elif fixed_ad_type == "12시 Only":
-        # 13시에 피크
         weights = [0, 0.10, 0.10, 0.28, 0.12, 0.12, 0.10, 0.10, 0.08]
-        
     elif fixed_ad_type == "12시+14시 Both":
-        # 13시, 15시 더블 피크
         weights = [0, 0.10, 0.10, 0.20, 0.10, 0.25, 0.10, 0.08, 0.07]
-        
-    else: # 없음
+    else: 
         weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09]
 
     gap = res['da_18'] - start_resource_10
@@ -226,11 +215,16 @@ with tab3:
     
     da_tom_req = tom_total_target - tom_sa_9
     
+    # [수정] 여기서 비율을 다시 계산해줍니다
+    if op_mode == '상품증대': ratio_ba_tom = 0.84
+    elif op_mode == '효율화': ratio_ba_tom = 0.88
+    else: ratio_ba_tom = 0.898
+
     report_tomorrow = f"""DA+제휴 명일 오전 9시 예상 자원 공유드립니다.
 
 - 9시 예상 시작 자원 : {tom_total_target}건
-ㄴ 보장분석 : {round(da_tom_req * ratio_ba)}건
-ㄴ 상품자원 : {round(da_tom_req * (1-ratio_ba))}건
+ㄴ 보장분석 : {round(da_tom_req * ratio_ba_tom)}건
+ㄴ 상품자원 : {round(da_tom_req * (1-ratio_ba_tom))}건
 
 * 명일 영업가족 {tom_member}명 기준 인당 자원 {tom_per}건 이상 확보할 수 있도록 운영 예정입니다."""
     st.text_area("복사용 텍스트 (퇴근):", report_tomorrow, height=250)
