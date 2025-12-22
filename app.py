@@ -18,8 +18,8 @@ def get_font():
 get_font()
 
 # 2. 웹사이트 UI
-st.title("📊 메리츠화재 DA 보고 자동화 (v3.0)")
-st.markdown("**업데이트:** 14시(재무/24시예측) vs 16시(막판스퍼트/효율화) 양식 분리")
+st.title("📊 메리츠화재 DA 보고 자동화 (V3.1)")
+st.markdown("**Final Update:** 14시/16시 양식 분리 + 월요일 예측 로직 보정 완료")
 
 with st.sidebar:
     st.header("1. 기본 설정")
@@ -45,7 +45,6 @@ with st.sidebar:
     st.header("4. 비용 입력 (14시 보고용)")
     cost_da = st.number_input("DA 소진액", value=45000000)
     cost_aff = st.number_input("제휴 소진액", value=20000000)
-    # 총 비용 자동 합산
     cost_total = cost_da + cost_aff
 
     st.header("5. 명일 예상 설정")
@@ -65,9 +64,14 @@ def generate_report():
     else: ratio_ba = 0.898
     ratio_prod = 1 - ratio_ba
     
-    # 2) 요일 가중치
-    w = {'월': 1.05, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
-    if fixed_ad_type != "없음": w = max(w, 1.0)
+    # 2) 요일 가중치 (월요일 과대평가 방지 로직 적용)
+    # 월요일은 14시 실적이 높아도 18시 마감율이 낮으므로 가중치 0.82 적용
+    w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
+    
+    # 고정광고가 있으면 가중치 회복 (단, 월요일은 보수적 유지)
+    if fixed_ad_type != "없음": 
+        if day_option == '월': w = 0.90 # 월요일이라도 광고 있으면 조금 회복
+        else: w = max(w, 1.0)
 
     # 3) 목표 계산
     da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
@@ -81,36 +85,31 @@ def generate_report():
     da_per_18 = round(da_target_18 / active_member, 1)
     da_per_17 = round(da_target_17 / active_member, 1)
 
-    # 4) [14시 로직] Financial Forecast
-    # 14시->18시 예측 (약 1.35~1.38배)
-    est_18_from_14 = int(current_total * 1.38 * w)
+    # 4) [14시 로직] Financial Forecast (월요일 보정 적용)
+    # 기본 Multiplier 1.35 * 요일가중치
+    est_18_from_14 = int(current_total * 1.35 * w)
     
-    # Range 보정
+    # Range 보정 (목표와 너무 동떨어지지 않게)
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
     
-    # 18시->24시 예측 (로그 분석결과: 18시 대비 약 1.4배까지 증가 / 14시 대비 약 1.9배)
+    # 24시 예측 (18시 대비 약 1.4배)
     est_24 = int(est_18_from_14 * 1.40)
 
-    # 5) [16시 로직] Last Spurt (16:00~18:30)
-    # 로그상 16시~18:30에 추가되는 양은 보통 200~250건 내외
-    # 목표 달성 여부에 따라 잔여량 조절
-    
-    # 현재 페이스대로 갔을 때 18시 예상치
-    # 16시 실적은 보통 18시 마감의 90~92% 수준
+    # 5) [16시 로직] Last Spurt (적중률 높음)
+    # 16시 실적 / 0.91 (약 9% 추가 성장)
     est_18_from_16 = int(current_total / 0.91)
     
-    # 남은 시간(16:00~18:30) 추가 확보 예상량 계산
     remaining_gap = est_18_from_16 - current_total
     
-    # 너무 적거나 많으면 보정 (최소 150건 ~ 최대 300건)
+    # 최소/최대 안전장치
     if remaining_gap < 150: remaining_gap = 150
     elif remaining_gap > 350: remaining_gap = 350
     
-    last_spurt_ba = int(remaining_gap * 0.9) # 막판엔 보장분석 비중 높음
+    last_spurt_ba = int(remaining_gap * 0.9) 
     last_spurt_prod = remaining_gap - last_spurt_ba
 
-    # 6) 멘트 생성 (14시 vs 16시 분리)
+    # 6) 멘트 생성
     fixed_msg = f"금일 {fixed_content}." if fixed_ad_type != "없음" else "금일 특이사항 없이 운영 중이며,"
     
     # 14시용 멘트
@@ -119,13 +118,13 @@ def generate_report():
     else:
         msg_14 = f"오전 목표 대비 소폭 부족할 것으로 예상되나, 남은 시간 상품자원/보장분석 Push 운영하겠습니다."
 
-    # 16시용 멘트
+    # 16시용 멘트 (운영 중심)
     if current_total + remaining_gap >= da_target_18:
         msg_16 = "* 보장분석 자원 넉넉할 것으로 보여 DA배너 일부 축소하여 비용 절감하겠습니다."
     else:
         msg_16 = "* 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."
 
-    # 7) CPA 계산 (14시 보고용)
+    # 7) CPA 계산
     cpa_da = round(cost_da / current_bojang / 10000, 1) if current_bojang else 0
     cpa_aff = round(cost_aff / current_prod / 10000, 1) if current_prod else 0
     cpa_total = round(cost_total / current_total / 10000, 1) if current_total else 0
@@ -144,116 +143,7 @@ def generate_report():
         'da_18': da_target_18, 'per_18': da_per_18,
         'ba_18': round(da_target_18 * ratio_ba), 'prod_18': round(da_target_18 * ratio_prod),
         
-        # 14시용 데이터
+        # 14시 데이터
         'est_18_14': est_18_from_14, 
         'est_per_18_14': round(est_18_from_14/active_member, 1),
-        'est_ba_18_14': round(est_18_from_14 * ratio_ba), 
-        'est_prod_18_14': round(est_18_from_14 * ratio_prod),
-        'est_24': est_24,
-        'msg_14': msg_14,
-        'cpa_da': cpa_da, 'cpa_aff': cpa_aff, 'cpa_total': cpa_total,
-
-        # 16시용 데이터
-        'est_18_16': current_total + remaining_gap,
-        'remaining_total': remaining_gap,
-        'remaining_ba': last_spurt_ba,
-        'remaining_prod': last_spurt_prod,
-        'msg_16': msg_16,
-
-        'fixed_msg': fixed_msg,
-        'tom_total': tom_total_target, 'tom_da': tom_da_req, 'tom_per_msg': tom_per_msg,
-        'tom_ba': round(tom_da_req * ratio_ba), 'tom_prod': round(tom_da_req * (1-ratio_ba))
-    }
-
-res = generate_report()
-
-# 4. 탭 구성
-tab1, tab2, tab3, tab4 = st.tabs(["09:30 목표", "14:00 중간(재무)", "16:00 마감(운영)", "18:00 퇴근"])
-
-with tab1:
-    st.subheader("📋 오전 10:30 목표 수립 보고")
-    issue_text = "\n* 금일 이슈 상황을 고려하여 목표를 보수적으로 설정하였습니다." if "이슈" in target_mode else ""
-    
-    report_morning = f"""금일 DA+제휴파트 예상마감 공유드립니다.
-
-[17시 기준]
-총 자원 : {res['da_17']}건 ({active_member}명, {res['per_17']}건 배정 기준)
-ㄴ 보장분석 : {res['ba_17']}건
-ㄴ 상품 : {res['prod_17']}건
-
-[18시 기준]
-총 자원 : {res['da_18']}건 ({active_member}명, {res['per_18']}건 배정 기준)
-ㄴ 보장분석 : {res['ba_18']}건
-ㄴ 상품 : {res['prod_18']}건
-
-* {res['fixed_msg']}{issue_text}"""
-    st.text_area("복사용 텍스트 (오전):", report_morning, height=300)
-    
-    # (그래프 코드는 길이상 생략하나 기존과 동일하게 유지됩니다)
-
-with tab2:
-    st.subheader("🔥 14:00 중간 보고 (재무/예측)")
-    st.info("※ 사이드바에 '비용(소진액)'을 입력해야 CPA가 정확히 계산됩니다.")
-    
-    # 24시 예측 비용 (단순비례)
-    est_cost_24 = int(cost_total * 1.8) 
-    est_da_24 = int(cost_da * 1.8)
-    est_aff_24 = int(cost_aff * 1.8)
-
-    report_1400 = f"""DA파트 금일 14시간 현황 전달드립니다.
-
-금일 목표(18시 기준) : 인당배분 {res['per_18']}건 / 총 {res['da_18']}건
-현황(14시) : 인당배분 {round(current_total/active_member, 1)}건 / 총 {current_total}건
-예상 마감(18시 기준) : 인당배분 {res['est_per_18_14']}건 / 총 {res['est_18_14']}건
-ㄴ 보장분석 : {res['est_ba_18_14']}건, 상품 {res['est_prod_18_14']}건
-
-* {res['fixed_msg']} {res['msg_14']}
-
-[현재 성과 - 14시 기준]
-- 총합(DA/제휴): {int(cost_total)//10000}만원 / 가망CPA {res['cpa_total']}만원
-- DA: {int(cost_da)//10000}만원 / 가망CPA {res['cpa_da']}만원
-- 제휴: {int(cost_aff)//10000}만원 / 가망CPA {res['cpa_aff']}만원
-
-[예상 마감 - 18시 기준]
-- 총합(DA/제휴): {int(cost_total * 1.35)//10000}만원 / 가망CPA {max(3.1, res['cpa_total']-0.3)}만원
-- DA: {int(cost_da * 1.4)//10000}만원 / 가망CPA {max(4.4, res['cpa_da'])}만원
-- 제휴: {int(cost_aff * 1.25)//10000}만원 / 가망CPA {max(2.4, res['cpa_aff']-0.2)}만원
-
-[예상 마감 - 24시 기준]
-- 총합(DA/제휴): {est_cost_24//10000}만원 / 가망CPA {max(2.9, res['cpa_total']-0.5)}만원"""
-    
-    st.text_area("복사용 텍스트 (14시):", report_1400, height=450)
-
-with tab3:
-    st.subheader("⚠️ 16:00 마감 임박 보고 (운영)")
-    st.warning("※ 사이드바 '3. 실시간 실적'에 16시 기준 데이터를 입력하세요!")
-    
-    report_1600 = f"""DA파트 금일 16시간 현황 전달드립니다.
-
-금일 목표(18시 기준) : 총 {res['da_18']}건
-ㄴ 보장분석 : {res['ba_18']}건, 상품 {res['prod_18']}건
-
-16시 현황 : 총 {current_total}건
-ㄴ 보장분석 : {current_bojang}건, 상품 {current_prod}건
-
-16시 ~ 18시 30분 예상 건수
-ㄴ 보장분석 {res['remaining_ba']}건
-ㄴ 상품 {res['remaining_prod']}건
-
-{res['msg_16']}"""
-    
-    st.text_area("복사용 텍스트 (16시):", report_1600, height=300)
-
-with tab4:
-    st.subheader("🌙 명일 자원 수립 (퇴근 전)")
-    ad_msg = "\n* 명일 새벽 고정광고(CPT/풀뷰) 집행 예정으로 자원 추가 확보 예상됩니다." if tom_dawn_ad else ""
-        
-    report_tomorrow = f"""DA+제휴 명일 오전 9시 예상 자원 공유드립니다.
-
-- 9시 예상 시작 자원 : {res['tom_total']}건
-ㄴ 보장분석 : {res['tom_ba']}건
-ㄴ 상품자원 : {res['tom_prod']}건
-
-* 영업가족 {tom_member}명 기준 인당 {res['tom_per_msg']}건 이상 확보할 수 있도록 운영 예정입니다.{ad_msg}"""
-    
-    st.text_area("복사용 텍스트 (퇴근):", report_tomorrow, height=250)
+        'est_ba_18_14': round
