@@ -28,15 +28,16 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (Parser with Strong Blacklist)
+# 1. 유틸리티 함수 (Fixed Parser)
 # -----------------------------------------------------------
 def parse_uploaded_files(files):
     data_frames = []
     
-    # [인식 대상 컬럼]
-    target_cols = ['비용', '소진', 'Cost', '금액', '총 비용', '캠페인', 'Campaign', '광고명', '매체']
+    # [핵심 수정 1] 피랩 파일도 인식할 수 있도록 검사 키워드 대폭 추가
+    # 피랩 파일 컬럼: '구분', 'media group', 'account', '보장분석', '계' 등
+    target_cols = ['비용', '소진', 'Cost', '금액', '총 비용', '캠페인', 'Campaign', '광고명', '매체', 
+                   'media group', 'account', '구분']
     
-    # [건수 키워드] (우선순위 순)
     count_cols_keywords = ['보장분석', '잠재고객', '전환', 'DB', '결과', '계', '합계', '수량', '건수']
 
     for file in files:
@@ -45,22 +46,24 @@ def parse_uploaded_files(files):
         is_plab = 'performance' in fname or 'lab' in fname 
         
         try:
+            # 검사할 때는 타겟 컬럼과 건수 키워드를 모두 합쳐서 하나라도 있으면 유효한 파일로 인정
+            validation_keys = target_cols + count_cols_keywords
+
             # --- A. CSV / TXT Parsing ---
             if fname.endswith(('.csv', '.txt')):
-                df = try_read_csv(file, target_cols, count_cols_keywords)
+                df = try_read_csv(file, validation_keys, count_cols_keywords)
             
             # --- B. Excel Parsing ---
             elif fname.endswith(('.xlsx', '.xls')):
                 try:
                     file.seek(0)
                     temp_df = pd.read_excel(file, engine='openpyxl')
-                    if check_validity(temp_df, target_cols):
+                    if check_validity(temp_df, validation_keys):
                         df = refine_df(temp_df, target_cols, count_cols_keywords)
                     else:
-                        df = find_header_in_excel(temp_df, target_cols, count_cols_keywords)
+                        df = find_header_in_excel(temp_df, validation_keys, count_cols_keywords)
                 except:
-                    # 엑셀 실패 시 CSV로 재시도
-                    df = try_read_csv(file, target_cols, count_cols_keywords)
+                    df = try_read_csv(file, validation_keys, count_cols_keywords)
 
             if df is not None:
                 df['source_file'] = 'PLAB' if is_plab else 'RAW'
@@ -71,7 +74,7 @@ def parse_uploaded_files(files):
 
     return data_frames
 
-def try_read_csv(file, targets, count_keys):
+def try_read_csv(file, validation_keys, count_keys):
     encodings = ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
     separators = [',', '\t']
     
@@ -79,13 +82,12 @@ def try_read_csv(file, targets, count_keys):
         for sep in separators:
             try:
                 file.seek(0)
-                # 메타데이터 스킵 (상위 30줄 검색)
                 lines = file.readlines()
                 header_row = -1
                 for i, line in enumerate(lines[:30]):
                     try:
                         line_str = line.decode(enc)
-                        if any(k in line_str for k in targets):
+                        if any(k in line_str for k in validation_keys):
                             header_row = i
                             break
                     except: continue
@@ -93,22 +95,23 @@ def try_read_csv(file, targets, count_keys):
                 if header_row != -1:
                     file.seek(0)
                     df = pd.read_csv(file, encoding=enc, sep=sep, header=header_row, on_bad_lines='skip')
-                    if check_validity(df, targets):
-                        return refine_df(df, targets, count_keys)
+                    if check_validity(df, validation_keys):
+                        return refine_df(df, validation_keys, count_keys)
             except: continue
     return None
 
-def check_validity(df, targets):
+def check_validity(df, keys):
     if len(df.columns) < 1: return False
-    return any(k in str(c) for c in df.columns for k in targets)
+    # 컬럼명 중 하나라도 키워드에 포함되면 True
+    return any(k in str(c) for c in df.columns for k in keys)
 
-def find_header_in_excel(df, targets, count_keys):
+def find_header_in_excel(df, validation_keys, count_keys):
     for i in range(20):
         if i >= len(df): break
         row_vals = df.iloc[i].astype(str).values
-        if any(k in v for v in row_vals for k in targets):
+        if any(k in v for v in row_vals for k in validation_keys):
             df.columns = df.iloc[i]
-            return refine_df(df.iloc[i+1:].reset_index(drop=True), targets, count_keys)
+            return refine_df(df.iloc[i+1:].reset_index(drop=True), validation_keys, count_keys)
     return None
 
 def refine_df(df, cost_keys, cnt_keys):
@@ -116,21 +119,18 @@ def refine_df(df, cost_keys, cnt_keys):
     cols = df.columns.tolist()
     
     # 1. 비용 컬럼 찾기
-    col_cost = next((c for c in cols if any(x in str(c) for x in cost_keys)), None)
+    col_cost = next((c for c in cols if any(x in str(c) for x in ['비용', '소진', 'Cost', '금액'])), None)
     
-    # 2. 건수 컬럼 찾기 (Blacklist 적용 - 여기가 핵심!)
-    # 이 단어들이 포함된 컬럼은 절대 건수로 잡지 않음
+    # 2. 건수 컬럼 찾기 (Blacklist 적용)
     blacklist = ['노출', '도달', '클릭', 'CPM', 'CPC', 'CTR', '비용', '단가', '율', 'Rate']
     
     col_cnt = None
     for key in cnt_keys:
-        # 해당 키워드가 포함된 컬럼 중 블랙리스트 단어가 없는 것 찾기
         candidates = [c for c in cols if key in str(c) and not any(b in str(c) for b in blacklist)]
-        
-        # '결과' 컬럼의 경우 '결과 유형'이나 '결과당 비용' 등은 제외
+        # '결과'는 정확히 일치하는 것만 (결과 유형 등 제외)
         if key == '결과':
              candidates = [c for c in candidates if str(c).strip() == '결과']
-
+        
         if candidates:
             col_cnt = candidates[0]
             break
@@ -138,8 +138,8 @@ def refine_df(df, cost_keys, cnt_keys):
     # 3. 캠페인명 찾기
     col_camp = next((c for c in cols if any(x in str(c) for x in ['캠페인', 'Campaign', '광고명', '매체', 'account', 'media group'])), None)
     
-    # 4. 결과 유형 (네이버 GFA용)
-    col_type_detail = next((c for c in cols if '결과 유형' in str(c)), None)
+    # 4. [핵심 수정 2] 네이버 GFA '결과 유형' 컬럼 찾기
+    col_result_type = next((c for c in cols if '결과 유형' in str(c)), None)
 
     if col_camp:
         temp = pd.DataFrame()
@@ -153,9 +153,11 @@ def refine_df(df, cost_keys, cnt_keys):
         
         if col_cnt:
             temp['count'] = df[col_cnt].apply(to_num).fillna(0)
-            # 네이버 GFA 예외처리: 결과 유형이 '클릭'이면 건수 0 처리
-            if col_type_detail:
-                is_click = df[col_type_detail].astype(str).str.contains('클릭')
+            
+            # [핵심 수정 2 적용] 결과 유형이 '클릭'이면 건수 0 처리
+            if col_result_type:
+                # '클릭'이 포함된 행 찾기
+                is_click = df[col_result_type].astype(str).str.contains('클릭')
                 temp.loc[is_click, 'count'] = 0
         else:
             temp['count'] = 0
@@ -178,7 +180,6 @@ def aggregate_data(dfs, manual_aff_cost=0, manual_aff_cnt=0, manual_da_cost=0, m
     }
     
     if not dfs:
-        # 순수 수기 모드
         res['da_cost'] = manual_da_cost
         res['da_cnt'] = manual_da_cnt
         res['aff_cost'] = manual_aff_cost
@@ -187,18 +188,16 @@ def aggregate_data(dfs, manual_aff_cost=0, manual_aff_cnt=0, manual_da_cost=0, m
         res['total_cnt'] = manual_da_cnt + manual_aff_cnt
         return res
 
-    # 1. 파일 데이터 통합
     all_rows = pd.concat(dfs, ignore_index=True)
     all_rows['group'] = all_rows.apply(classify_row, axis=1)
     
-    # 2. PLAB 파일 확인
     has_plab = any(df['source_file'].iloc[0] == 'PLAB' for df in dfs if not df.empty)
     
-    # 3. 집계
     file_da_cost = all_rows[all_rows['group']=='DA']['cost'].sum()
     file_aff_cost = all_rows[all_rows['group']=='Affiliate']['cost'].sum()
     
     if has_plab:
+        # PLAB 파일이 있으면 그것만 건수로 인정 (중복 방지)
         plab_rows = all_rows[all_rows['source_file']=='PLAB']
         file_da_cnt = plab_rows[plab_rows['group']=='DA']['count'].sum()
         file_aff_cnt = plab_rows[plab_rows['group']=='Affiliate']['count'].sum()
@@ -206,11 +205,9 @@ def aggregate_data(dfs, manual_aff_cost=0, manual_aff_cnt=0, manual_da_cost=0, m
         file_da_cnt = all_rows[all_rows['group']=='DA']['count'].sum()
         file_aff_cnt = all_rows[all_rows['group']=='Affiliate']['count'].sum()
         
-    # 4. 수기 입력 적용
     res['da_cost'] = int(file_da_cost + manual_da_cost)
     res['da_cnt'] = int(file_da_cnt + manual_da_cnt)
     
-    # 제휴 Override 로직 (수기 있으면 파일값 무시)
     if manual_aff_cost > 0 or manual_aff_cnt > 0:
         res['aff_cost'] = int(manual_aff_cost)
         res['aff_cnt'] = int(manual_aff_cnt)
@@ -221,9 +218,9 @@ def aggregate_data(dfs, manual_aff_cost=0, manual_aff_cnt=0, manual_da_cost=0, m
     res['total_cost'] = res['da_cost'] + res['aff_cost']
     res['total_cnt'] = res['da_cnt'] + res['aff_cnt']
     
-    # 비율 계산
-    bojang_kwd_cnt = all_rows[all_rows['campaign'].astype(str).str.contains('보장')]['count'].sum()
+    # 비율 계산 시 0으로 나누기 방지
     if all_rows['count'].sum() > 0:
+        bojang_kwd_cnt = all_rows[all_rows['campaign'].astype(str).str.contains('보장')]['count'].sum()
         res['ratio_ba'] = bojang_kwd_cnt / all_rows['count'].sum()
         if res['ratio_ba'] < 0.1: res['ratio_ba'] = 0.898
         
@@ -236,22 +233,24 @@ def aggregate_data(dfs, manual_aff_cost=0, manual_aff_cnt=0, manual_da_cost=0, m
 def run_v6_6_legacy():
     st.title("📊 메리츠화재 DA 보고 자동화 (Legacy V6.6)")
     st.info("ℹ️ 기존 수기 입력 모드입니다.")
-    # (Legacy 코드는 이전과 동일)
+    # (기존 코드 생략 - 이전 버전과 동일)
 
 # -----------------------------------------------------------
 # MODE 2: V16.3 Advanced
 # -----------------------------------------------------------
 def run_v16_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V16.3 Fixed)")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V16.3 Fix)")
     st.markdown("🚀 **파서 정밀도 향상 & 에러 방지 & 중복 방지**")
 
-    # [핵심] 변수 초기화 (NameError 방지)
+    # [핵심 수정 3] 변수 초기화 (NameError 방지)
     current_bojang = 0
     current_prod = 0
     est_ba_18_14 = 0
     est_prod_18_14 = 0
     da_target_bojang = 0
     da_target_prod = 0
+    da_per_18 = 0
+    da_target_18 = 0 # 추가 초기화
     
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -298,7 +297,6 @@ def run_v16_0_advanced():
             manual_aff_cnt = int(manual_aff_cost / manual_aff_cpa) if manual_aff_cpa > 0 else 0
             st.info(f"ㄴ 제휴 환산: {manual_aff_cnt:,}건")
 
-        # 분석 및 집계
         dfs = parse_uploaded_files(uploaded_realtime) if uploaded_realtime else []
         res = aggregate_data(dfs, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt)
         
@@ -306,10 +304,8 @@ def run_v16_0_advanced():
         cost_total = res['total_cost']
         ratio_ba = res['ratio_ba']
         
-        # 보장/상품 배분
         ratio_prod = 1 - ratio_ba
         if is_aff_bojang:
-            # 제휴는 전량 보장, DA는 비율대로
             current_bojang = int(res['da_cnt'] * ratio_ba) + res['aff_cnt']
         else:
             current_bojang = int(current_total * ratio_ba)
@@ -330,23 +326,19 @@ def run_v16_0_advanced():
     mul_14 = base_mul_14
     mul_16 = 1.25 if is_boosting else 1.10
 
-    da_target_bojang = target_bojang - sa_est_bojang
-    da_target_prod = target_product - sa_est_prod + da_add_target
-    da_target_18 = da_target_bojang + da_target_prod
+    da_target_18 = (target_bojang - sa_est_bojang) + (target_product - sa_est_prod + da_add_target)
     da_per_18 = round(da_target_18 / active_member, 1) if active_member else 0
 
     est_18_from_14 = int(current_total * mul_14)
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
-    # 예상치 계산 시 제휴 보장 옵션 반영
     if is_aff_bojang:
         est_ba_18_14 = int((est_18_from_14 - res['aff_cnt']) * ratio_ba) + res['aff_cnt']
     else:
         est_ba_18_14 = int(est_18_from_14 * ratio_ba)
     est_prod_18_14 = est_18_from_14 - est_ba_18_14
 
-    # CPA
     cpa_da = round(res['da_cost'] / res['da_cnt'] / 10000, 1) if res['da_cnt'] > 0 else 0
     cpa_aff = round(res['aff_cost'] / res['aff_cnt'] / 10000, 1) if res['aff_cnt'] > 0 else 0
     cpa_total = round(cost_total / current_total / 10000, 1) if current_total > 0 else 0
@@ -371,7 +363,8 @@ def run_v16_0_advanced():
         c1.metric("최종 목표", f"{da_target_18:,}건")
         c2.metric("현재 실적", f"{current_total:,}건")
         c3.metric("마감 예상", f"{est_final_live:,}건")
-        st.progress(min(1.0, current_total/da_target_18 if da_target_18 else 1))
+        if da_target_18 > 0:
+            st.progress(min(1.0, current_total/da_target_18))
 
     with tab2:
         st.subheader("🔥 14:00 중간 보고")
@@ -395,6 +388,10 @@ def run_v16_0_advanced():
 - 제휴: {int(res['aff_cost'] * 1.25)//10000:,}만원 / 가망CPA {max(2.4, cpa_aff-0.2):.1f}만원"""
         st.text_area("복사 텍스트 (14시):", report_1400, height=450)
 
+    # ... (나머지 탭 동일) ...
+    # 지면상 16시 마감, 퇴근 탭 코드는 생략하지만 실제 코드에는 포함되어야 합니다.
+    # 이전 코드의 tab3, tab4 부분을 그대로 복붙해주세요.
+    
     with tab3:
         st.subheader("⚠️ 16:00 마감 임박 보고")
         report_1600 = f"""DA파트 금일 16시간 현황 전달드립니다.
@@ -407,8 +404,6 @@ def run_v16_0_advanced():
 
 * 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."""
         st.text_area("복사 텍스트 (16시):", report_1600, height=300)
-
-    # ... (나머지 탭 동일) ...
 
 def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
