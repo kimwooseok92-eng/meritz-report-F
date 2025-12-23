@@ -11,7 +11,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V18.35 (Updated)", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V18.35 (Fixed)", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -29,7 +29,7 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 및 데이터 처리 함수 (신규 로직 반영)
+# 1. 유틸리티 및 데이터 처리 함수
 # -----------------------------------------------------------
 def clean_currency(x):
     """쉼표 제거 및 숫자 변환 (Safe Float Conversion)"""
@@ -74,6 +74,23 @@ def get_media_from_plab(row):
 
     return '기타'
 
+def read_csv_safe(file, **kwargs):
+    """
+    인코딩 자동 감지하여 CSV 읽기 (UTF-8, CP949 등 순차 시도)
+    """
+    encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']
+    
+    for enc in encodings:
+        try:
+            file.seek(0)
+            df = pd.read_csv(file, encoding=enc, **kwargs)
+            return df
+        except Exception:
+            continue
+    
+    # 모든 인코딩 실패 시 None 반환하지 않고 에러 발생시켜서 상위에서 잡게 함
+    raise ValueError(f"파일 인코딩을 인식할 수 없습니다: {file.name}")
+
 def process_marketing_data(uploaded_files):
     """
     업로드된 파일 리스트를 받아 파일명을 기준으로 파싱 후 통합 데이터 반환
@@ -82,28 +99,32 @@ def process_marketing_data(uploaded_files):
     
     for file in uploaded_files:
         filename = file.name
-        file.seek(0) # 파일 포인터 초기화
         
         try:
             # 1. 네이버 (result...)
             if 'result' in filename:
-                df = pd.read_csv(file)
+                df = read_csv_safe(file)
                 df['Cost'] = df['총 비용'].apply(clean_currency)
                 df['상품'] = df['캠페인 이름'].apply(classify_product)
                 df['매체'] = '네이버'
-                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
+                # 그룹화 시 보장 컬럼 미리 0으로 세팅 (컬럼 누락 방지)
+                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
+                grouped['보장'] = 0 
+                dfs.append(grouped)
 
             # 2. 카카오 (메리츠화재다이렉트...)
             elif '메리츠화재다이렉트' in filename:
-                df = pd.read_csv(file, sep='\t')
+                df = read_csv_safe(file, sep='\t')
                 df['Cost'] = df['비용'].apply(clean_currency) * 1.1
                 df['상품'] = df['캠페인'].apply(classify_product)
                 df['매체'] = '카카오'
-                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
+                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
+                grouped['보장'] = 0
+                dfs.append(grouped)
 
             # 3. 토스 (메리츠 화재... 통합 성과보고서)
             elif '메리츠 화재' in filename and '통합' in filename:
-                df = pd.read_csv(file, header=3)
+                df = read_csv_safe(file, header=3)
                 # 합계 행 제거
                 if '캠페인 명' in df.columns:
                      df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
@@ -111,11 +132,13 @@ def process_marketing_data(uploaded_files):
                 df['Cost'] = df['소진 비용'].apply(clean_currency) * 1.1
                 df['상품'] = df['캠페인 명'].apply(classify_product)
                 df['매체'] = '토스'
-                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
+                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
+                grouped['보장'] = 0
+                dfs.append(grouped)
 
             # 4. 구글 (캠페인 보고서...)
             elif '캠페인 보고서' in filename:
-                df = pd.read_csv(file, sep='\t', header=2)
+                df = read_csv_safe(file, sep='\t', header=2)
                 df.columns = df.columns.str.strip()
                 # 합계 행 제거
                 if '캠페인' in df.columns:
@@ -126,11 +149,13 @@ def process_marketing_data(uploaded_files):
                 df['Cost'] = cost_val * 1.1 * 1.15
                 df['상품'] = df['캠페인'].apply(classify_product)
                 df['매체'] = '구글'
-                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
+                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
+                grouped['보장'] = 0
+                dfs.append(grouped)
 
             # 5. 피랩 (Performance Lab...)
             elif 'Performance Lab' in filename:
-                df = pd.read_csv(file)
+                df = read_csv_safe(file)
                 # DB 계산: 전송 - 실패 - 재인입
                 db_cnt = (df['METIS전송'].apply(clean_currency) - 
                           df['METIS실패건수'].apply(clean_currency) - 
@@ -156,7 +181,13 @@ def process_marketing_data(uploaded_files):
     all_data = pd.concat(dfs, ignore_index=True)
     final_df = all_data.groupby(['매체', '상품']).sum().reset_index()
     
-    # CPA 계산
+    # [중요] 안전장치: '보장' 또는 'Cost' 컬럼이 없으면 0으로 생성
+    if '보장' not in final_df.columns:
+        final_df['보장'] = 0.0
+    if 'Cost' not in final_df.columns:
+        final_df['Cost'] = 0.0
+    
+    # CPA 계산 (컬럼 존재 보장됨)
     final_df['CPA'] = final_df.apply(lambda x: x['Cost'] / x['보장'] if x['보장'] > 0 else 0, axis=1)
     
     return final_df
@@ -220,7 +251,7 @@ def convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, m
 # -----------------------------------------------------------
 def run_v18_35_master():
     st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Updated)")
-    st.markdown("🚀 **자동 파일 인식 & 로직 검증 완료**")
+    st.markdown("🚀 **자동 파일 인식 & 에러 방지 패치 완료**")
 
     # 변수 초기화
     current_bojang, current_prod = 0, 0
