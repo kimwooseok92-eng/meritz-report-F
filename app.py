@@ -5,7 +5,7 @@ import platform
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V14.2", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V15.0", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -60,7 +60,7 @@ def analyze_data(df, aff_to_bojang=False):
         'da_cnt': 0, 'da_cost': 0,
         'aff_cnt': 0,
         'media_stats': pd.DataFrame(),
-        'ratio_ba': 0.84 # 기본값
+        'ratio_ba': 0.84
     }
     
     if df.empty: return res
@@ -189,7 +189,7 @@ def run_v6_6_legacy():
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
-    tom_total_target = tom_base_total + ad_boost
+    tom_total_target = tom_base_total + ad_boost 
     tom_da_req = tom_total_target - tom_sa_9
     tom_per_msg = 5.0 if tom_dawn_ad else 4.4
     ad_msg = "\n* 명일 새벽 고정광고(CPT/풀뷰) 집행 예정으로 자원 추가 확보 예상됩니다." if tom_dawn_ad else ""
@@ -287,11 +287,11 @@ def run_v6_6_legacy():
 
 
 # -----------------------------------------------------------
-# MODE 2: V14.2 (Advanced - Detailed Table in Dashboard)
+# MODE 2: V15.0 (Advanced - Final Verification & Updates)
 # -----------------------------------------------------------
-def run_v14_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V14.2 Advanced)")
-    st.markdown("🚀 **Time-Based Dynamic Forecasting (시점별 정밀 예측)**")
+def run_v15_0_advanced():
+    st.title("📊 메리츠화재 DA 통합 시스템 (V15.0 Final)")
+    st.markdown("🚀 **요일별 가중치 보정 & 부스팅 & 수기 제휴관리**")
 
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -300,6 +300,11 @@ def run_v14_0_advanced():
             options=["09:30", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"],
             value="14:00"
         )
+        
+        # [NEW] 16시 이후 부스팅 버튼 활성화
+        is_boosting = False
+        if current_time_str in ["16:00", "17:00"]:
+            is_boosting = st.checkbox("🔥 긴급 부스팅 적용 (막판 스퍼트)", value=False)
         
         day_option = st.selectbox("오늘 요일", ['월', '화', '수', '목', '금'], index=0)
         target_mode = st.radio("목표 기조", ['평시', '이슈/보수적', '월말/공격적'], index=1 if day_option=='월' else 0)
@@ -346,34 +351,44 @@ def run_v14_0_advanced():
         if uploaded_realtime:
             st.info(f"💡 파일 기반 비율 적용 중 (보장 {int(real_data['ratio_ba']*100)}%)")
             ratio_ba = real_data['ratio_ba']
-            def_da_cnt = real_data['da_cnt']
-            def_da_cost = real_data['da_cost']
+            # 파일 데이터 적용
+            current_da_cnt = real_data['da_cnt']
+            cost_da = real_data['da_cost']
+            current_aff_cnt = real_data['aff_cnt']
+            cost_aff = int(real_data['total_cost'] - cost_da) # 근사치
+            cpa_aff_input = 0 # 파일 모드에선 자동 계산
         else:
-            st.caption("파일 없음: 운영 전략 선택값 적용 (수기모드)")
+            st.caption("📂 파일 없음: 수기 입력 모드")
             if op_mode_select == '상품증대': ratio_ba = 0.84
             elif op_mode_select == '효율화': ratio_ba = 0.88
             else: ratio_ba = 0.898
-            def_da_cnt = 1500
-            def_da_cost = 23000000
+            
+            # [NEW] 수기 입력 디테일 강화
+            st.markdown("##### 🅰️ DA (배너광고)")
+            current_da_cnt = st.number_input("DA 실적 (건수)", value=1500)
+            cost_da = st.number_input("DA 소진액 (원)", value=23000000)
+            
+            st.markdown("##### 🅱️ 제휴 (카카오/토스)")
+            cost_aff = st.number_input("제휴 소진액 (원)", value=11270000)
+            cpa_aff_input = st.number_input("제휴 단가 (CPA)", value=14000, step=100)
+            current_aff_cnt = int(cost_aff / cpa_aff_input) if cpa_aff_input > 0 else 0
+            
+            st.info(f"🧮 제휴 실적 자동 계산: **{current_aff_cnt:,}건**")
 
         ratio_prod = 1 - ratio_ba
-
-        st.markdown("##### 🅰️ DA (비제휴) 실적")
-        current_da_cnt = st.number_input("[자동] DA 건수", value=def_da_cnt)
-        cost_da = st.number_input("[자동] DA 소진액", value=def_da_cost)
         
-        st.markdown("##### 🅱️ 제휴(Affiliate) 실적")
-        cost_aff = st.number_input("제휴 소진액 (원)", value=11270000)
-        cpa_aff_input = st.number_input("제휴 단가 (CPA)", value=14000, step=100)
-        
-        current_aff_cnt = int(cost_aff / cpa_aff_input) if cpa_aff_input > 0 else 0
-        st.info(f"🧮 제휴 실적 자동 계산: **{current_aff_cnt:,}건**")
-        
+        # 합산 로직
         current_total = current_da_cnt + current_aff_cnt
         cost_total = cost_da + cost_aff
         
-        if is_aff_bojang: current_bojang = int(current_total * ratio_ba)
-        else: current_bojang = int(current_total * ratio_ba)
+        # 보장/상품 배분 로직 (제휴 보장 체크 시)
+        if is_aff_bojang:
+            # 제휴는 무조건 보장, DA는 비율대로? -> V14 방식 유지 (전체 비율 적용)
+            # 이유: 보통 제휴가 보장이면 DA도 보장 효율이 같이 오르는 경향
+            current_bojang = int(current_total * ratio_ba)
+        else:
+            current_bojang = int(current_total * ratio_ba)
+            
         current_prod = current_total - current_bojang
 
         st.header("5. 기타 설정")
@@ -383,11 +398,16 @@ def run_v14_0_advanced():
         fixed_ad_type = st.radio("발송 시간", ["없음", "12시", "14시", "Both"], index=2)
         fixed_content = st.text_input("내용", value="14시 카카오페이 TMS 발송 예정입니다")
 
-    # --- 계산 로직 ---
-    w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
-    if fixed_ad_type != "없음" and day_option == '월': w = 0.90
-    mul_14 = 1.215 if "12시" in fixed_ad_type else 1.35 * w
-    mul_16 = 1.099
+    # --- 로직 ---
+    # [NEW] 14시 예측 배수 요일별 보정 (월요일 페널티)
+    base_mul_14 = 1.35
+    if day_option == '월': 
+        base_mul_14 = 1.15
+    elif fixed_ad_type != "없음": 
+        base_mul_14 = 1.215 # 고정광고 있는 날 (화수목)
+        
+    mul_14 = base_mul_14
+    mul_16 = 1.25 if is_boosting else 1.10 # [NEW] 부스팅 반영
 
     da_target_bojang = target_bojang - sa_est_bojang
     da_target_prod = target_product - sa_est_prod + da_add_target
@@ -398,6 +418,7 @@ def run_v14_0_advanced():
     da_per_17 = round(da_target_17 / active_member, 1)
 
     est_18_from_14 = int(current_total * mul_14)
+    # Range limit
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
@@ -405,7 +426,7 @@ def run_v14_0_advanced():
     est_prod_18_14 = round(est_18_from_14 * (1-ratio_ba))
 
     cpa_da = round(cost_da / current_da_cnt / 10000, 1) if current_da_cnt > 0 else 0
-    cpa_aff = round(cpa_aff_input / 10000, 1)
+    cpa_aff = round(cost_aff / current_aff_cnt / 10000, 1) if current_aff_cnt > 0 else 0
     cpa_total = round(cost_total / current_total / 10000, 1) if current_total > 0 else 0
     est_cost_24 = int(cost_total * 1.8)
 
@@ -422,13 +443,14 @@ def run_v14_0_advanced():
     else:
         msg_16 = "* 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."
     
+    # [NEW] Time Multipliers (월요일 등 반영)
     time_multipliers = {
         "09:30": 1.0, 
         "10:00": 1.75, "11:00": 1.65, "12:00": 1.55, "13:00": 1.45,
         "14:00": mul_14,
-        "15:00": 1.22,
-        "16:00": 1.10, 
-        "17:00": 1.05, 
+        "15:00": (mul_14 + mul_16) / 2, # 평균값
+        "16:00": mul_16, 
+        "17:00": 1.05 if not is_boosting else 1.15, 
         "18:00": 1.0
     }
     
@@ -442,7 +464,8 @@ def run_v14_0_advanced():
                 d_raw[col.replace('현재', '예상')] = (d_raw[col] * current_mul).astype(int)
         dash_live = d_raw[sorted(d_raw.columns.tolist())]
     
-    view_label = f"기준 시각: {current_time_str} (x{current_mul})"
+    view_label = f"기준 시각: {current_time_str} (x{current_mul:.2f})"
+    if is_boosting: view_label += " 🔥부스팅 ON"
     
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
@@ -457,9 +480,8 @@ def run_v14_0_advanced():
 
     with tab0:
         st.subheader(f"📊 실시간 DA 운영 현황")
-        st.caption(f"ℹ️ {view_label}이 적용된 예상치입니다.")
+        st.caption(f"ℹ️ {view_label}")
         
-        # 09:30일 때는 계획표 우선
         if current_time_str == "09:30":
              st.info("📌 오전 09:30: 실시간 예측 대신 '목표 배분 계획'을 확인하세요.")
              hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
@@ -472,7 +494,6 @@ def run_v14_0_advanced():
                  acc_res.append(acc_res[-1] + round(gap * (w / total_w)))
              acc_res[-1] = da_target_18
              
-             # [NEW] 상세 분할 표 (Tab 0 전용)
              acc_ba = [int(x * ratio_ba) for x in acc_res]
              acc_prod = [x - b for x, b in zip(acc_res, acc_ba)]
              
@@ -499,7 +520,6 @@ def run_v14_0_advanced():
             if not dash_live.empty:
                 st.dataframe(dash_live.style.format("{:,}").background_gradient(cmap='Blues'), use_container_width=True)
             
-            # [NEW] 상세 분할 표 (예측 기준)
             hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
             ba_start = int(start_resource_10 * ratio_ba)
             prod_start = start_resource_10 - ba_start
@@ -507,7 +527,6 @@ def run_v14_0_advanced():
             est_ba_live = int(est_final_live * ratio_ba)
             est_prod_live = est_final_live - est_ba_live
             
-            # 흐름 계산
             ba_flow = [int(ba_start + (est_ba_live - ba_start) * (i/8)) for i in range(9)]
             prod_flow = [int(prod_start + (est_prod_live - prod_start) * (i/8)) for i in range(9)]
             total_flow = [b+p for b,p in zip(ba_flow, prod_flow)]
@@ -616,11 +635,11 @@ def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
     version = st.sidebar.selectbox(
         "사용할 버전을 선택하세요:",
-        ["V14.2 (Advanced)", "V6.6 (Legacy)"]
+        ["V15.0 (Final)", "V6.6 (Legacy)"]
     )
     
-    if version == "V14.2 (Advanced)":
-        run_v14_0_advanced()
+    if version == "V15.0 (Final)":
+        run_v15_0_advanced()
     else:
         run_v6_6_legacy()
 
