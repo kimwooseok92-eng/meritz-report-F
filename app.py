@@ -4,13 +4,13 @@ import platform
 import io
 import warnings
 
-# 경고 메시지 무시 (스타일 관련 경고)
+# 경고 메시지 무시
 warnings.simplefilter("ignore")
 
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V15.4", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V15.5", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -28,19 +28,24 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (Stronger Excel Parser)
+# 1. 유틸리티 함수 (Encoding Master Parser)
 # -----------------------------------------------------------
 def parse_uploaded_files(files):
     combined_df = pd.DataFrame()
     
-    # 핵심 키워드
+    # 이 단어들이 포함된 줄을 '진짜 헤더'로 간주
     target_cols = ['비용', '소진', 'Cost', '금액', '캠페인', 'Campaign', '광고명', '매체']
 
     for file in files:
         df = None
+        # 파일명 소문자 처리
+        fname = file.name.lower()
+        
         try:
-            # 1. CSV / TXT 파일 처리
-            if file.name.lower().endswith(('.csv', '.txt')):
+            # -------------------------------------------------------
+            # 전략 1: CSV / TXT 파일로 접근 (우선순위)
+            # -------------------------------------------------------
+            if fname.endswith(('.csv', '.txt')):
                 encodings = ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
                 separators = [',', '\t']
                 
@@ -50,85 +55,114 @@ def parse_uploaded_files(files):
                         try:
                             file.seek(0)
                             temp_df = pd.read_csv(file, encoding=enc, sep=sep, on_bad_lines='skip')
-                            
-                            if len(temp_df.columns) > 1:
-                                if any(k in str(c) for c in temp_df.columns for k in target_cols):
-                                    df = temp_df
+                            if check_validity(temp_df, target_cols):
+                                df = refine_df(temp_df, target_cols)
+                                break
+                            else:
+                                # 헤더가 아래에 있는 경우 탐색
+                                found_df = find_header_in_csv(file, enc, sep, target_cols)
+                                if found_df is not None:
+                                    df = refine_df(found_df, target_cols)
                                     break
-                                else:
-                                    for i in range(15):
-                                        if i >= len(temp_df): break
-                                        row_vals = temp_df.iloc[i].astype(str).values
-                                        if any(k in v for v in row_vals for k in target_cols):
-                                            file.seek(0)
-                                            df = pd.read_csv(file, encoding=enc, sep=sep, header=i+1, on_bad_lines='skip')
-                                            break
-                                    if df is not None: break
                         except: continue
 
-            # 2. 엑셀 파일 처리 (오류 회피 로직 추가)
-            elif file.name.lower().endswith(('.xlsx', '.xls')):
+            # -------------------------------------------------------
+            # 전략 2: 엑셀(.xlsx) 파일로 접근
+            # -------------------------------------------------------
+            elif fname.endswith(('.xlsx', '.xls')):
+                # [A] 정석 엑셀 읽기
                 try:
                     file.seek(0)
-                    # [핵심] 1차 시도: 일반 읽기
-                    df = pd.read_excel(file)
+                    temp_df = pd.read_excel(file, engine='openpyxl') # 엔진 명시
+                    if check_validity(temp_df, target_cols):
+                        df = refine_df(temp_df, target_cols)
+                    else:
+                        # 헤더 찾기
+                        df = find_header_in_excel(temp_df, target_cols)
                 except Exception:
+                    df = None # 실패 시 다음 단계로
+
+                # [B] 엑셀 읽기 실패 시 -> '가짜 엑셀(CSV)'로 의심하고 CP949로 읽기 (이게 핵심!)
+                if df is None:
                     try:
                         file.seek(0)
-                        # [핵심] 2차 시도: openpyxl 엔진 명시 (스타일 오류 발생 가능성)
-                        df = pd.read_excel(file, engine='openpyxl')
-                    except Exception:
-                        try:
-                            # [핵심] 3차 시도: 바이너리 모드로 읽어서 텍스트 추출 시도 (최후의 수단)
-                            # 엑셀 파일이 사실상 CSV인 경우 (확장자만 엑셀)
+                        # 한글 윈도우 인코딩(cp949)으로 읽기 시도
+                        temp_df = pd.read_csv(file, encoding='cp949', on_bad_lines='skip')
+                        if check_validity(temp_df, target_cols):
+                            df = refine_df(temp_df, target_cols)
+                        else:
+                            # 탭 구분자 + cp949 시도
                             file.seek(0)
-                            df = pd.read_csv(file, encoding='utf-8-sig', on_bad_lines='skip')
-                        except Exception as e:
-                            st.warning(f"⚠️ '{file.name}' 읽기 실패 (스타일 손상 의심): {e}")
-                            continue
-                
-                # 헤더 찾기 로직 (공통)
-                if df is not None:
-                    if not any(k in str(c) for c in df.columns for k in target_cols):
-                        for i in range(20):
-                            if i >= len(df): break
-                            row_values = df.iloc[i].astype(str).values
-                            if any(k in v for v in row_values for k in target_cols):
-                                df.columns = df.iloc[i]
-                                df = df.iloc[i+1:].reset_index(drop=True)
-                                break
+                            temp_df = pd.read_csv(file, encoding='cp949', sep='\t', on_bad_lines='skip')
+                            if check_validity(temp_df, target_cols):
+                                df = refine_df(temp_df, target_cols)
+                    except Exception:
+                        pass # 여기까지 안 되면 진짜 깨진 파일
 
+            # -------------------------------------------------------
             # 3. 데이터 병합
+            # -------------------------------------------------------
             if df is not None:
-                df.columns = [str(c).strip() for c in df.columns]
-                cols = df.columns.tolist()
-                
-                col_cost = next((c for c in cols if any(x in str(c) for x in ['비용', '소진', 'Cost', '금액'])), None)
-                col_cnt = next((c for c in cols if any(x in str(c) for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
-                col_camp = next((c for c in cols if any(x in str(c) for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
-                col_type = next((c for c in cols if any(x in str(c) for x in ['구분', 'type'])), None)
-
-                if col_cost and col_cnt:
-                    temp = pd.DataFrame()
-                    
-                    def clean_number(x):
-                        try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
-                        except: return 0
-
-                    temp['cost'] = df[col_cost].apply(clean_number).fillna(0)
-                    temp['count'] = df[col_cnt].apply(clean_number).fillna(0)
-                    temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
-                    
-                    if col_type: temp['type'] = df[col_type].fillna('')
-                    else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
-                    
-                    combined_df = pd.concat([combined_df, temp], ignore_index=True)
+                combined_df = pd.concat([combined_df, df], ignore_index=True)
 
         except Exception as e:
-            # 개별 파일 오류는 전체 중단을 막기 위해 pass
+            # st.error(f"파일 처리 오류 ({file.name}): {e}") # 디버깅용
             pass
 
     return combined_df
+
+# [보조 함수] 데이터프레임 유효성 검사 (키워드 포함 여부)
+def check_validity(df, targets):
+    if len(df.columns) < 1: return False
+    return any(k in str(c) for c in df.columns for k in targets)
+
+# [보조 함수] CSV 헤더 찾기
+def find_header_in_csv(file, enc, sep, targets):
+    file.seek(0)
+    lines = file.readlines()
+    for idx, line in enumerate(lines[:20]):
+        try:
+            line_str = line.decode(enc)
+            if any(k in line_str for k in targets):
+                file.seek(0)
+                return pd.read_csv(file, encoding=enc, sep=sep, header=idx, on_bad_lines='skip')
+        except: continue
+    return None
+
+# [보조 함수] 엑셀 헤더 찾기 및 정제
+def find_header_in_excel(df, targets):
+    for i in range(20):
+        if i >= len(df): break
+        row_vals = df.iloc[i].astype(str).values
+        if any(k in v for v in row_vals for k in targets):
+            df.columns = df.iloc[i]
+            return refine_df(df.iloc[i+1:].reset_index(drop=True), targets)
+    return None
+
+# [보조 함수] 최종 데이터 정제 (컬럼 매핑 및 숫자 변환)
+def refine_df(df, targets):
+    df.columns = [str(c).strip() for c in df.columns]
+    cols = df.columns.tolist()
+    
+    col_cost = next((c for c in cols if any(x in str(c) for x in ['비용', '소진', 'Cost', '금액'])), None)
+    col_cnt = next((c for c in cols if any(x in str(c) for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
+    col_camp = next((c for c in cols if any(x in str(c) for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
+    col_type = next((c for c in cols if any(x in str(c) for x in ['구분', 'type'])), None)
+
+    if col_cost and col_cnt:
+        temp = pd.DataFrame()
+        def clean_num(x):
+            try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
+            except: return 0
+        
+        temp['cost'] = df[col_cost].apply(clean_num).fillna(0)
+        temp['count'] = df[col_cnt].apply(clean_num).fillna(0)
+        temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
+        
+        if col_type: temp['type'] = df[col_type].fillna('')
+        else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
+        return temp
+    return None
 
 def analyze_data(df, aff_to_bojang=False):
     res = {
@@ -206,21 +240,20 @@ def run_v6_6_legacy():
         start_resource_10 = st.number_input("10시 시작 자원 (그래프용)", value=1100)
 
         st.header("3. 실시간 실적 입력")
-        current_total = st.number_input("현재 총 자원 (DA+제휴)", value=1963)
+        current_total = st.number_input("현재 총 자원", value=2000)
         current_bojang = st.number_input("ㄴ 보장분석", value=1600)
-        current_prod = st.number_input("ㄴ 상품자원", value=363)
-
-        st.header("4. 비용 입력 (14시 보고용)")
-        cost_da = st.number_input("DA 소진액", value=23560000)
+        current_prod = st.number_input("ㄴ 상품자원", value=400)
+        
+        cost_da = st.number_input("DA 소진액", value=23000000)
         cost_aff = st.number_input("제휴 소진액", value=11270000)
         cost_total = cost_da + cost_aff
 
-        st.header("5. 명일 예상 설정")
+        st.header("4. 명일 예상 설정")
         tom_member = st.number_input("명일 활동 인원", value=350)
         tom_sa_9 = st.number_input("명일 SA 9시 예상", value=410)
         tom_dawn_ad = st.checkbox("내일 새벽 고정광고 있음", value=False)
         
-        st.header("6. 금일 고정구좌 (중요)")
+        st.header("5. 금일 고정구좌 (중요)")
         fixed_ad_type = st.radio("발송 시간", ["없음", "12시 Only", "14시 Only", "12시+14시 Both"], index=2)
         fixed_content = st.text_input("내용", value="14시 KBPAY 발송 완료되었습니다")
 
@@ -364,10 +397,10 @@ def run_v6_6_legacy():
 
 
 # -----------------------------------------------------------
-# MODE 2: V15.4 (Advanced - Excel Error Fix)
+# MODE 2: V15.5 (Advanced - Encoding Master)
 # -----------------------------------------------------------
 def run_v15_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V15.4 Smart Fix)")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V15.5 Master)")
     st.markdown("🚀 **엑셀 오류 자동 회피 & CSV 집중 분석**")
 
     with st.sidebar:
@@ -701,10 +734,10 @@ def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
     version = st.sidebar.selectbox(
         "사용할 버전을 선택하세요:",
-        ["V15.4 (Smart Fix)", "V6.6 (Legacy)"]
+        ["V15.5 (Master)", "V6.6 (Legacy)"]
     )
     
-    if version == "V15.4 (Smart Fix)":
+    if version == "V15.5 (Master)":
         run_v15_0_advanced()
     else:
         run_v6_6_legacy()
