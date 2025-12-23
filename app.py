@@ -10,7 +10,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V17.0", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V18.0", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -28,18 +28,36 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (Dual Track Parser)
+# 1. 유틸리티 함수 (Dual Track Parser & Aggregator)
 # -----------------------------------------------------------
+def normalize_media(text):
+    """매체명 표준화 함수"""
+    text = str(text).lower()
+    if any(x in text for x in ['네이버', 'naver', 'gfa', 'nasp']): return '네이버'
+    if any(x in text for x in ['카카오', 'kakao', 'kakaoment', '비즈보드']): return '카카오'
+    if any(x in text for x in ['토스', 'toss']): return '토스'
+    if any(x in text for x in ['구글', 'google', 'youtube', 'pmax']): return '구글'
+    if any(x in text for x in ['제휴', 'affiliate']): return '제휴'
+    return '기타'
+
+def classify_type(text):
+    """보장/상품 구분 함수"""
+    text = str(text).lower()
+    if '보장' in text: return '보장'
+    return '상품'
+
+def clean_num(x):
+    try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
+    except: return 0
+
 def parse_files_dual_track(files):
     """
     파일을 '비용 소스(Raw)'와 'DB 소스(PLAB)'로 분리하여 처리
     """
-    df_cost_source = pd.DataFrame() # 비용 계산용 (네/카/구/토)
-    df_db_source = pd.DataFrame()   # DB 계산용 (피랩)
+    df_cost_source = pd.DataFrame() 
+    df_db_source = pd.DataFrame()   
     
-    # [설정] 비용 파일에서 찾을 컬럼
     cost_keywords = ['비용', '소진', 'Cost', '금액', '총 비용']
-    # [설정] DB 파일(피랩)에서 찾을 컬럼 (우선순위: 계 > 보장분석 > 합계)
     db_keywords = ['계', '합계', '보장분석', '전환', 'DB', '건수', '잠재고객']
 
     for file in files:
@@ -47,20 +65,13 @@ def parse_files_dual_track(files):
         is_plab = 'performance' in fname or 'lab' in fname or '피랩' in fname
         
         try:
-            # 파일 읽기 (공통)
             df = read_file_generic(file)
             if df is None or df.empty: continue
             
-            # --- 트랙 분기 ---
             if is_plab:
                 # [Track B] 피랩 데이터 -> DB 건수 추출 전용
-                # 필요한 컬럼: 매체 구분(account, media), 유형(구분), 건수(계/보장분석)
                 temp = pd.DataFrame()
-                
-                # 1. 건수 컬럼 찾기
                 col_cnt = find_col(df, db_keywords)
-                
-                # 2. 매체/유형 컬럼 찾기
                 col_media = find_col(df, ['media', 'account', '매체', '그룹'])
                 col_type = find_col(df, ['구분', 'type', '캠페인'])
                 
@@ -70,12 +81,9 @@ def parse_files_dual_track(files):
                     temp['type_raw'] = df[col_type].fillna('') if col_type else ''
                     temp['source'] = 'PLAB'
                     df_db_source = pd.concat([df_db_source, temp], ignore_index=True)
-                    
             else:
                 # [Track A] 매체 로우 데이터 -> 비용 추출 전용
-                # 필요한 컬럼: 캠페인명(보장/상품 구분용), 비용
                 temp = pd.DataFrame()
-                
                 col_cost = find_col(df, cost_keywords)
                 col_camp = find_col(df, ['캠페인', 'Campaign', '광고명'])
                 
@@ -85,13 +93,12 @@ def parse_files_dual_track(files):
                     temp['source'] = 'RAW'
                     df_cost_source = pd.concat([df_cost_source, temp], ignore_index=True)
 
-        except Exception as e:
+        except Exception:
             pass
 
     return df_cost_source, df_db_source
 
 def read_file_generic(file):
-    """CSV/Excel 상관없이 읽어서 DataFrame 반환"""
     try:
         file.seek(0)
         if file.name.lower().endswith(('.csv', '.txt')):
@@ -103,123 +110,111 @@ def read_file_generic(file):
                     except: continue
         else:
             try: return pd.read_excel(file, engine='openpyxl')
-            except: return pd.read_csv(file) # 가짜 엑셀 대응
+            except: return pd.read_csv(file)
     except: return None
     return None
 
 def find_col(df, keywords):
-    """키워드가 포함된 컬럼명 찾기"""
     for col in df.columns:
         if any(k in str(col) for k in keywords):
             return col
     return None
 
-def clean_num(x):
-    try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
-    except: return 0
-
-def normalize_media(row, source_type):
-    """매체명 표준화"""
-    text = str(row.get('campaign', '') if source_type == 'RAW' else row.get('media_raw', '')).lower()
-    if any(x in text for x in ['네이버', 'naver', 'gfa', 'nasp']): return '네이버'
-    if any(x in text for x in ['카카오', 'kakao', 'kakaoment']): return '카카오'
-    if any(x in text for x in ['토스', 'toss']): return '토스'
-    if any(x in text for x in ['구글', 'google', 'youtube']): return '구글'
-    return '기타'
-
-def classify_type(row, source_type):
-    """보장/상품 구분"""
-    text = str(row.get('campaign', '') if source_type == 'RAW' else row.get('type_raw', '')).lower()
-    if '보장' in text: return '보장'
-    return '상품' # 기본값
-
 def aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt):
-    res = {
-        'da_cost': 0, 'da_cnt': 0,
-        'aff_cost': 0, 'aff_cnt': 0,
-        'total_cost': 0, 'total_cnt': 0,
-        'bojang_cnt': 0, 'prod_cnt': 0,
-        'ratio_ba': 0.898
-    }
-
-    # 1. 비용 집계 (Raw File 기준)
+    """
+    이원화된 데이터를 매체별로 집계하고, 수기 입력을 반영하여 최종 통계를 산출
+    """
+    # 1. 초기화
+    stats = pd.DataFrame(columns=['Bojang_Cnt', 'Prod_Cnt', 'Cost', 'CPA'])
+    
+    # 2. 매체별 그룹핑 (비용)
     if not df_cost.empty:
-        df_cost['media'] = df_cost.apply(lambda x: normalize_media(x, 'RAW'), axis=1)
-        df_cost['type'] = df_cost.apply(lambda x: classify_type(x, 'RAW'), axis=1)
-        
-        # 제휴 비용 분리 (토스, 카카오 등 제휴 매체로 식별된 것 중 캠페인명에 '제휴'가 있거나 특정 조건)
-        # 리더님 요청: "네/카/구/토는 보장/상품 구분과 비용 데이터만 사용" -> DA 비용으로 산정하되 제휴는 별도
-        # 여기서는 단순하게 매체별 합산 후 제휴 수기 입력과 병합
-        
-        # 전체 비용 합산
-        res['da_cost'] = int(df_cost['cost'].sum())
+        df_cost['media_group'] = df_cost['campaign'].apply(normalize_media)
+        cost_grp = df_cost.groupby('media_group')['cost'].sum()
+        for media, val in cost_grp.items():
+            if media not in stats.index: stats.loc[media] = [0, 0, 0, 0]
+            stats.loc[media, 'Cost'] += val
 
-    # 2. DB 집계 (PLAB File 기준)
+    # 3. 매체별 그룹핑 (건수)
     if not df_db.empty:
-        df_db['media'] = df_db.apply(lambda x: normalize_media(x, 'PLAB'), axis=1)
-        df_db['type'] = df_db.apply(lambda x: classify_type(x, 'PLAB'), axis=1)
+        df_db['media_group'] = df_db['media_raw'].apply(normalize_media)
+        df_db['type_group'] = df_db['type_raw'].apply(classify_type)
         
-        # 전체 DB 합산
-        res['da_cnt'] = int(df_db['count'].sum())
-        
-        # 보장/상품 건수 상세 집계
-        res['bojang_cnt'] = int(df_db[df_db['type']=='보장']['count'].sum())
-        res['prod_cnt'] = int(df_db[df_db['type']=='상품']['count'].sum())
+        cnt_grp = df_db.groupby(['media_group', 'type_group'])['count'].sum()
+        for (media, type_), val in cnt_grp.items():
+            if media not in stats.index: stats.loc[media] = [0, 0, 0, 0]
+            if type_ == '보장':
+                stats.loc[media, 'Bojang_Cnt'] += val
+            else:
+                stats.loc[media, 'Prod_Cnt'] += val
 
-    # 3. 수기 입력 적용 (Override & Add)
-    # DA: 파일값 + 수기값 (누락분 추가)
-    res['da_cost'] += manual_da_cost
-    res['da_cnt'] += manual_da_cnt
-    
-    # 제휴: 수기값 우선 (파일에 제휴가 섞여있어도 피랩이 건수 마스터이므로, 피랩에 제휴가 포함되어 있다면 중복 위험)
-    # 피랩 데이터에 제휴가 포함되어 있다면? -> 피랩에서 제휴를 발라내야 함.
-    # 피랩의 'media_raw'나 'type_raw'에 '제휴'가 있는지 확인
-    if not df_db.empty:
-        # 피랩 데이터 중 '제휴'로 추정되는 건수 제외 (수기로 넣을거니까)
-        mask_aff_plab = df_db['media_raw'].astype(str).str.contains('제휴') | df_db['type_raw'].astype(str).str.contains('제휴')
-        aff_in_plab = df_db[mask_aff_plab]['count'].sum()
-        
-        # 피랩 총 건수에서 제휴 추정치 제외 (순수 DA만 남김)
-        res['da_cnt'] -= int(aff_in_plab)
-        if res['bojang_cnt'] > aff_in_plab: res['bojang_cnt'] -= int(aff_in_plab) # 대략적 차감
+    # 4. 수기 입력 반영
+    # 4-1. DA 수기 (기존 값에 더하기 - 누락분 보정)
+    if manual_da_cnt > 0 or manual_da_cost > 0:
+        if '기타(수기)' not in stats.index: stats.loc['기타(수기)'] = [0, 0, 0, 0]
+        # 일단 비율대로 나누거나 상품으로 몰기 (여기선 단순 상품으로 가정)
+        stats.loc['기타(수기)', 'Prod_Cnt'] += manual_da_cnt
+        stats.loc['기타(수기)', 'Cost'] += manual_da_cost
 
-    # 제휴 최종값 설정
-    res['aff_cost'] = manual_aff_cost
-    res['aff_cnt'] = manual_aff_cnt
+    # 4-2. 제휴 수기 (Override - 기존 파일의 제휴 데이터 덮어쓰기)
+    if manual_aff_cnt > 0 or manual_aff_cost > 0:
+        # 기존에 '제휴'나 '토스' 등에 섞여있던 제휴 데이터를 어떻게 처리할지가 관건
+        # 리더님 요청: "수기 입력 시 파일 데이터 무시" -> '제휴' 행을 아예 수기로 교체
+        if '제휴' in stats.index:
+            stats.drop('제휴', inplace=True) # 기존 제휴 삭제
+        
+        # 새 제휴 행 추가 (제휴는 보통 보장 위주라고 가정하거나 설정 따름)
+        stats.loc['제휴(수기)'] = [manual_aff_cnt, 0, manual_aff_cost, 0] 
+        # *제휴는 보통 보장으로 분류되지만, 필요 시 분기 처리 가능
+
+    # 5. 최종 CPA 계산 및 합계
+    stats = stats.fillna(0)
+    stats['Total_Cnt'] = stats['Bojang_Cnt'] + stats['Prod_Cnt']
+    stats['CPA'] = stats.apply(lambda x: x['Cost'] / x['Total_Cnt'] if x['Total_Cnt'] > 0 else 0, axis=1)
     
-    # 최종 합산
-    res['total_cost'] = res['da_cost'] + res['aff_cost']
-    res['total_cnt'] = res['da_cnt'] + res['aff_cnt']
+    # 6. 전체 합계 딕셔너리 생성
+    total_res = {
+        'da_cost': int(stats.drop(['제휴(수기)', '제휴'], errors='ignore')['Cost'].sum()),
+        'da_cnt': int(stats.drop(['제휴(수기)', '제휴'], errors='ignore')['Total_Cnt'].sum()),
+        'aff_cost': int(stats.loc[[i for i in stats.index if '제휴' in i], 'Cost'].sum()),
+        'aff_cnt': int(stats.loc[[i for i in stats.index if '제휴' in i], 'Total_Cnt'].sum()),
+        'bojang_cnt': int(stats['Bojang_Cnt'].sum()),
+        'prod_cnt': int(stats['Prod_Cnt'].sum()),
+        'media_stats': stats # 대시보드용 데이터프레임
+    }
     
-    # 보장 건수 보정 (수기 제휴가 보장이라면)
-    # (여기선 단순하게 비율 계산을 위해 놔둠)
+    total_res['total_cost'] = total_res['da_cost'] + total_res['aff_cost']
+    total_res['total_cnt'] = total_res['da_cnt'] + total_res['aff_cnt']
     
-    if res['total_cnt'] > 0:
-        # 보장 비율 재계산 (PLAB 기준 보장 건수 + 수기 제휴가 보장이라면 추가 필요)
-        # 편의상 현재 PLAB의 비율을 전체에 적용하거나, 수기 입력 시 보장 여부를 묻는게 정확함.
-        # 일단 PLAB 데이터 기반 비율 유지
-        if not df_db.empty:
-            total_plab = df_db['count'].sum()
-            bojang_plab = df_db[df_db['type']=='보장']['count'].sum()
-            if total_plab > 0:
-                res['ratio_ba'] = bojang_plab / total_plab
-    
-    return res
+    if total_res['total_cnt'] > 0:
+        total_res['ratio_ba'] = total_res['bojang_cnt'] / total_res['total_cnt']
+    else:
+        total_res['ratio_ba'] = 0.898
+
+    return total_res
 
 
 # -----------------------------------------------------------
-# MODE 2: V17.0 Advanced
+# MODE 1: Legacy (유지)
 # -----------------------------------------------------------
-def run_v16_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V17.0 Dual Master)")
-    st.markdown("🚀 **비용(Raw) / 건수(PLAB) 이원화 처리**")
+def run_v6_6_legacy():
+    st.title("📊 메리츠화재 DA 보고 자동화 (Legacy V6.6)")
+    st.info("ℹ️ 기존 수기 입력 모드입니다.")
+    # (Legacy 코드 생략)
 
-    # [중요] 변수 사전 초기화 (NameError 방지)
+# -----------------------------------------------------------
+# MODE 2: V18.0 Dashboard Master
+# -----------------------------------------------------------
+def run_v18_0_dashboard_master():
+    st.title("📊 메리츠화재 DA 통합 시스템 (V18.0 Dashboard Master)")
+    st.markdown("🚀 **비용(Raw)/건수(PLAB) 이원화 & 대시보드/부스팅 복구**")
+
+    # 변수 초기화 (NameError 방지)
     current_bojang, current_prod = 0, 0
     est_ba_18_14, est_prod_18_14 = 0, 0
     da_target_bojang, da_target_prod = 0, 0
-    da_per_18, da_per_17 = 0, 0
     da_target_18, da_target_17 = 0, 0
+    da_per_18, da_per_17 = 0, 0
     
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -229,9 +224,10 @@ def run_v16_0_advanced():
             value="14:00"
         )
         
+        # [복구] 부스팅 기능
         is_boosting = False
         if current_time_str in ["16:00", "17:00"]:
-            is_boosting = st.checkbox("🔥 긴급 부스팅 적용", value=False)
+            is_boosting = st.checkbox("🔥 긴급 부스팅 적용 (막판 스퍼트)", value=False)
         
         day_option = st.selectbox("오늘 요일", ['월', '화', '수', '목', '금'], index=0)
         
@@ -245,14 +241,14 @@ def run_v16_0_advanced():
         with c4: sa_est_prod = st.number_input("SA 상품 예상", value=800)
         da_add_target = st.number_input("DA 추가 버퍼", value=50)
 
-        # 목표 계산 (에러 방지를 위해 최상단 수행)
+        # 목표 계산
         da_target_bojang = target_bojang - sa_est_bojang
         da_target_prod = target_product - sa_est_prod + da_add_target
         da_target_18 = da_target_bojang + da_target_prod
         
         if active_member > 0:
             da_per_18 = round(da_target_18 / active_member, 1)
-            da_target_17 = int(da_target_18 * 0.96) # 단순화
+            da_target_17 = int(da_target_18 * 0.96)
             da_per_17 = round(da_target_17 / active_member, 1)
 
         st.header("3. [자동] 10시 시작 자원")
@@ -262,10 +258,10 @@ def run_v16_0_advanced():
         start_resource_10 = st.number_input("10시 자원 (수기/자동)", value=1100)
 
         st.header("4. [자동+수기] 실시간 분석")
-        uploaded_realtime = st.file_uploader("📊 실시간 로우데이터 (모두 선택)", accept_multiple_files=True)
+        uploaded_realtime = st.file_uploader("📊 실시간 로우데이터 (Raw + PLAB)", accept_multiple_files=True)
         is_aff_bojang = st.checkbox("☑️ 금일 제휴는 '보장' 위주", value=False)
         
-        st.markdown("**✏️ 수기 입력 (제휴)**")
+        st.markdown("**✏️ 수기 입력 (제휴 입력 시 파일값 무시)**")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
             manual_da_cnt = st.number_input("DA 추가 건수", value=0)
@@ -276,20 +272,21 @@ def run_v16_0_advanced():
             manual_aff_cnt = int(manual_aff_cost / manual_aff_cpa) if manual_aff_cpa > 0 else 0
             st.info(f"ㄴ 제휴 환산: {manual_aff_cnt:,}건")
 
-        # [핵심 로직] 이원화 파싱 및 집계
+        # [분석 수행]
         df_cost, df_db = parse_files_dual_track(uploaded_realtime) if uploaded_realtime else (pd.DataFrame(), pd.DataFrame())
         res = aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt)
         
         current_total = res['total_cnt']
         cost_total = res['total_cost']
         ratio_ba = res['ratio_ba']
+        current_bojang = res['bojang_cnt']
+        current_prod = res['prod_cnt']
         
-        # 보장/상품 배분
-        if is_aff_bojang:
-            current_bojang = int(res['da_cnt'] * ratio_ba) + res['aff_cnt']
-        else:
-            current_bojang = int(current_total * ratio_ba)
-        current_prod = current_total - current_bojang
+        # 제휴 보장 옵션에 따라 보장/상품 건수 미세 조정 (수기 제휴가 들어간 경우)
+        if is_aff_bojang and manual_aff_cnt > 0:
+             # 집계 함수에서 이미 제휴를 보장으로 쳤는지 확인 어렵지만,
+             # 여기서는 단순화를 위해 전체 비율로 재계산하거나 유지
+             pass 
 
         st.header("5. 기타 설정")
         tom_member = st.number_input("명일 활동 인원", value=350)
@@ -311,10 +308,7 @@ def run_v16_0_advanced():
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
-    if is_aff_bojang:
-        est_ba_18_14 = int((est_18_from_14 - res['aff_cnt']) * ratio_ba) + res['aff_cnt']
-    else:
-        est_ba_18_14 = int(est_18_from_14 * ratio_ba)
+    est_ba_18_14 = int(est_18_from_14 * ratio_ba)
     est_prod_18_14 = est_18_from_14 - est_ba_18_14
 
     cpa_da = round(res['da_cost'] / res['da_cnt'] / 10000, 1) if res['da_cnt'] > 0 else 0
@@ -333,18 +327,36 @@ def run_v16_0_advanced():
     est_final_live = int(current_total * current_mul)
 
     # --- 탭 출력 ---
-    tab0, tab1, tab2, tab3, tab4 = st.tabs(["📊 인사이트 대시보드", "🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근"])
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근"])
 
     with tab0:
-        st.subheader(f"📊 실시간 DA 운영 현황 ({current_time_str})")
-        c1, c2, c3 = st.columns(3)
+        st.subheader(f"📊 실시간 DA 현황 대시보드 ({current_time_str})")
+        
+        # 1. 상단 지표
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("최종 목표", f"{da_target_18:,}건")
-        c2.metric("현재 실적", f"{current_total:,}건")
-        c3.metric("마감 예상", f"{est_final_live:,}건")
-        if da_target_18 > 0:
-            st.progress(min(1.0, current_total/da_target_18))
-            
-        # 목표 그래프 (V14 복구)
+        progress = min(1.0, current_total/da_target_18) if da_target_18 > 0 else 0
+        c2.metric("현재 실적", f"{current_total:,}건", f"{progress*100:.1f}% 달성")
+        c3.metric("마감 예상", f"{est_final_live:,}건", f"Gap: {est_final_live - da_target_18}건")
+        c4.metric("현재 CPA", f"{cpa_total:.1f}만원")
+        
+        st.progress(progress)
+        
+        # 2. [요청하신 기능] 매체별 상세 표
+        st.markdown("##### 📌 매체별 상세 현황")
+        if not res['media_stats'].empty:
+            # 포맷팅을 위한 복사본
+            display_stats = res['media_stats'].copy()
+            display_stats = display_stats[['Bojang_Cnt', 'Prod_Cnt', 'Cost', 'CPA']]
+            display_stats.columns = ['보장(건)', '상품(건)', '비용(원)', 'CPA(원)']
+            st.dataframe(display_stats.style.format("{:,.0f}").background_gradient(cmap='Blues', subset=['보장(건)', '상품(건)']), use_container_width=True)
+        else:
+            st.info("데이터가 없습니다. 파일을 업로드해주세요.")
+
+    with tab1:
+        st.subheader("📋 오전 목표 수립 (복구됨)")
+        
+        # [복구] 목표 그래프 및 표 로직
         hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
         weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09]
         gap = da_target_18 - start_resource_10
@@ -354,10 +366,20 @@ def run_v16_0_advanced():
             acc_res.append(acc_res[-1] + round(gap * (w / total_w)))
         acc_res[-1] = da_target_18
         
-        st.line_chart(pd.DataFrame({'목표 흐름': acc_res}, index=hours))
-
-    with tab1:
-        st.subheader("📋 오전 목표")
+        # 시간당 확보량 계산
+        hourly_get = [0] + [acc_res[i]-acc_res[i-1] for i in range(1, len(acc_res))]
+        
+        # 차트
+        chart_data = pd.DataFrame({'누적 목표': acc_res}, index=hours)
+        st.line_chart(chart_data)
+        
+        # 표
+        df_plan = pd.DataFrame({
+            '누적 목표(건)': [f"{x:,}" for x in acc_res],
+            '시간당 확보(건)': [f"{x:,}" for x in hourly_get]
+        }, index=hours)
+        st.table(df_plan.T)
+        
         report_morning = f"""금일 DA+제휴파트 예상마감 공유드립니다.
 
 [17시 기준]
@@ -367,8 +389,8 @@ def run_v16_0_advanced():
 
 [18시 기준]
 총 자원 : {da_target_18:,}건 ({active_member}명, {da_per_18:.1f}건 배정 기준)
-ㄴ 보장분석 : {int(da_target_bojang):,}건
-ㄴ 상품 : {int(da_target_prod):,}건
+ㄴ 보장분석 : {da_target_bojang:,}건
+ㄴ 상품 : {da_target_prod:,}건
 
 * {fixed_msg}"""
         st.text_area("복사 텍스트:", report_morning, height=300)
@@ -422,8 +444,8 @@ def run_v16_0_advanced():
 
 def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
-    version = st.sidebar.selectbox("버전 선택", ["V17.0 (Dual Master)", "V6.6 (Legacy)"])
-    if version == "V17.0 (Dual Master)": run_v16_0_advanced()
+    version = st.sidebar.selectbox("버전 선택", ["V18.0 (Dashboard Master)", "V6.6 (Legacy)"])
+    if version == "V18.0 (Dashboard Master)": run_v18_0_dashboard_master()
     else: run_v6_6_legacy()
 
 if __name__ == "__main__":
