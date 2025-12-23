@@ -28,8 +28,137 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수
+# 1. 유틸리티 함수 (Smart File Reader & Dual Track)
 # -----------------------------------------------------------
+def read_file_smart(file):
+    """
+    파일의 형식(CSV/Excel/Tab)과 헤더 위치를 자동으로 찾아 읽어오는 똑똑한 함수
+    """
+    # 인식해야 할 핵심 키워드들
+    header_keywords = ['캠페인', 'Campaign', '광고명', '매체', '구분', 'media group', 'account']
+    
+    try:
+        fname = file.name.lower()
+        
+        # 1. 엑셀 파일 시도
+        if fname.endswith(('.xlsx', '.xls')):
+            try:
+                # 헤더 찾기
+                temp_df = pd.read_excel(file, header=None, nrows=30)
+                header_idx = find_header_row(temp_df, header_keywords)
+                if header_idx is not None:
+                    file.seek(0)
+                    return pd.read_excel(file, header=header_idx)
+            except: pass
+
+        # 2. CSV / 텍스트 파일 시도 (쉼표 & 탭)
+        # 여러 인코딩과 구분자를 순회하며 시도
+        encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']
+        separators = [',', '\t']
+        
+        for enc in encodings:
+            for sep in separators:
+                try:
+                    file.seek(0)
+                    # 일단 앞부분만 읽어서 헤더 위치 파악
+                    # sep=None은 파이썬 엔진을 써야해서 느리므로 명시적 sep 사용 권장
+                    temp_lines = [file.readline().decode(enc) for _ in range(30)]
+                    
+                    header_idx = -1
+                    for i, line in enumerate(temp_lines):
+                        if any(k in line for k in header_keywords):
+                            header_idx = i
+                            break
+                    
+                    if header_idx != -1:
+                        file.seek(0)
+                        df = pd.read_csv(file, encoding=enc, sep=sep, header=header_idx, on_bad_lines='skip')
+                        # 읽은 데이터가 유효한지(컬럼이 제대로 파싱됐는지) 확인
+                        if len(df.columns) > 1:
+                            return df
+                except: continue
+                
+    except Exception as e:
+        # st.error(f"파일 읽기 실패: {file.name} / {e}")
+        pass
+        
+    return None
+
+def find_header_row(df, keywords):
+    """데이터프레임 상위 행에서 키워드가 있는 행 번호 반환"""
+    for i in range(len(df)):
+        row_str = str(df.iloc[i].values)
+        if any(k in row_str for k in keywords):
+            return i
+    return None
+
+def parse_files_dual_track(files):
+    df_cost_source = pd.DataFrame() 
+    df_db_source = pd.DataFrame()   
+    
+    # 컬럼 매핑 사전
+    col_map = {
+        'cost': ['비용', '소진', 'Cost', '금액', '총 비용'],
+        'count': ['계', '합계', '보장분석', '전환', 'DB', '건수', '잠재고객', '결과'], # '결과'는 네이버용
+        'media': ['media', 'account', '매체', '그룹', '캠페인'],
+        'type': ['구분', 'type', '캠페인']
+    }
+
+    for file in files:
+        df = read_file_smart(file)
+        if df is None or df.empty: continue
+        
+        fname = file.name.lower()
+        is_plab = 'performance' in fname or 'lab' in fname or '피랩' in fname
+        
+        # [데이터 클렌징] 컬럼명 공백 제거
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # [중요] 네이버 GFA '결과' 컬럼 필터링 (클릭수 제외)
+        if '결과 유형' in df.columns and '결과' in df.columns:
+            # '클릭'이 포함된 행은 제외
+            df = df[~df['결과 유형'].astype(str).str.contains('클릭', na=False)]
+
+        if is_plab:
+            # [Track B] 피랩 -> DB 건수 추출
+            col_cnt = find_col(df, col_map['count'])
+            col_media = find_col(df, ['media', 'account', '매체'])
+            col_type = find_col(df, ['구분', 'type'])
+            
+            if col_cnt:
+                temp = pd.DataFrame()
+                temp['count'] = df[col_cnt].apply(clean_num).fillna(0)
+                temp['media_raw'] = df[col_media].fillna('기타') if col_media else '기타'
+                temp['type_raw'] = df[col_type].fillna('') if col_type else ''
+                temp['source'] = 'PLAB'
+                df_db_source = pd.concat([df_db_source, temp], ignore_index=True)
+        else:
+            # [Track A] Raw -> 비용 추출
+            col_cost = find_col(df, col_map['cost'])
+            col_camp = find_col(df, ['캠페인', 'Campaign', '광고명'])
+            
+            if col_cost and col_camp:
+                temp = pd.DataFrame()
+                temp['cost'] = df[col_cost].apply(clean_num).fillna(0)
+                temp['campaign'] = df[col_camp].fillna('기타')
+                temp['source'] = 'RAW'
+                df_cost_source = pd.concat([df_cost_source, temp], ignore_index=True)
+
+    return df_cost_source, df_db_source
+
+def find_col(df, keywords):
+    for col in df.columns:
+        # 정확도 높이기 위해 블랙리스트 적용 (예: '비용' 찾는데 '결과당 비용'은 제외)
+        if any(k in str(col) for k in keywords):
+            # 예외 처리: '결과당 비용'은 비용 컬럼이 아님 (단가임)
+            if '당 비용' in str(col) or 'CPM' in str(col) or 'CPC' in str(col): continue
+            return col
+    return None
+
+def clean_num(x):
+    try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
+    except: return 0
+
 def normalize_media(text):
     text = str(text).lower()
     if any(x in text for x in ['네이버', 'naver', 'gfa', 'nasp']): return '네이버'
@@ -44,78 +173,10 @@ def classify_type(text):
     if '보장' in text: return '보장'
     return '상품'
 
-def clean_num(x):
-    try: return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
-    except: return 0
-
-def parse_files_dual_track(files):
-    df_cost_source = pd.DataFrame() 
-    df_db_source = pd.DataFrame()   
-    
-    cost_keywords = ['비용', '소진', 'Cost', '금액', '총 비용']
-    db_keywords = ['계', '합계', '보장분석', '전환', 'DB', '건수', '잠재고객']
-
-    for file in files:
-        fname = file.name.lower()
-        is_plab = 'performance' in fname or 'lab' in fname or '피랩' in fname
-        
-        try:
-            df = read_file_generic(file)
-            if df is None or df.empty: continue
-            
-            if is_plab:
-                temp = pd.DataFrame()
-                col_cnt = find_col(df, db_keywords)
-                col_media = find_col(df, ['media', 'account', '매체', '그룹'])
-                col_type = find_col(df, ['구분', 'type', '캠페인'])
-                
-                if col_cnt:
-                    temp['count'] = df[col_cnt].apply(clean_num).fillna(0)
-                    temp['media_raw'] = df[col_media].fillna('기타') if col_media else '기타'
-                    temp['type_raw'] = df[col_type].fillna('') if col_type else ''
-                    temp['source'] = 'PLAB'
-                    df_db_source = pd.concat([df_db_source, temp], ignore_index=True)
-            else:
-                temp = pd.DataFrame()
-                col_cost = find_col(df, cost_keywords)
-                col_camp = find_col(df, ['캠페인', 'Campaign', '광고명'])
-                
-                if col_cost and col_camp:
-                    temp['cost'] = df[col_cost].apply(clean_num).fillna(0)
-                    temp['campaign'] = df[col_camp].fillna('기타')
-                    temp['source'] = 'RAW'
-                    df_cost_source = pd.concat([df_cost_source, temp], ignore_index=True)
-
-        except Exception:
-            pass
-
-    return df_cost_source, df_db_source
-
-def read_file_generic(file):
-    try:
-        file.seek(0)
-        if file.name.lower().endswith(('.csv', '.txt')):
-            for enc in ['utf-8-sig', 'cp949', 'euc-kr']:
-                for sep in [',', '\t']:
-                    try:
-                        file.seek(0)
-                        return pd.read_csv(file, encoding=enc, sep=sep, on_bad_lines='skip')
-                    except: continue
-        else:
-            try: return pd.read_excel(file, engine='openpyxl')
-            except: return pd.read_csv(file)
-    except: return None
-    return None
-
-def find_col(df, keywords):
-    for col in df.columns:
-        if any(k in str(col) for k in keywords):
-            return col
-    return None
-
 def aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt):
     stats = pd.DataFrame(columns=['Bojang_Cnt', 'Prod_Cnt', 'Cost', 'CPA'])
     
+    # 1. 비용 집계
     if not df_cost.empty:
         df_cost['media_group'] = df_cost['campaign'].apply(normalize_media)
         cost_grp = df_cost.groupby('media_group')['cost'].sum()
@@ -123,10 +184,14 @@ def aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manua
             if media not in stats.index: stats.loc[media] = [0, 0, 0, 0]
             stats.loc[media, 'Cost'] += val
 
+    # 2. DB 집계
     if not df_db.empty:
         df_db['media_group'] = df_db['media_raw'].apply(normalize_media)
         df_db['type_group'] = df_db['type_raw'].apply(classify_type)
         
+        # 피랩에서 '계' 컬럼을 가져오면 전체 합이므로, 보장분석만 따로 발라내거나 '계'를 씀.
+        # 보통 피랩 '계'는 (보장 + 상품) 합계임.
+        # 여기서는 'type_group'으로 나눴으므로 각각 더하면 됨.
         cnt_grp = df_db.groupby(['media_group', 'type_group'])['count'].sum()
         for (media, type_), val in cnt_grp.items():
             if media not in stats.index: stats.loc[media] = [0, 0, 0, 0]
@@ -135,13 +200,17 @@ def aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manua
             else:
                 stats.loc[media, 'Prod_Cnt'] += val
 
+    # 3. 수기 입력 (DA 추가)
     if manual_da_cnt > 0 or manual_da_cost > 0:
         if '기타(수기)' not in stats.index: stats.loc['기타(수기)'] = [0, 0, 0, 0]
         stats.loc['기타(수기)', 'Prod_Cnt'] += manual_da_cnt
         stats.loc['기타(수기)', 'Cost'] += manual_da_cost
 
+    # 4. 수기 입력 (제휴 Override)
+    # 기존에 '제휴'로 잡힌게 있으면 삭제하고 수기값으로 대체
     if manual_aff_cnt > 0 or manual_aff_cost > 0:
         if '제휴' in stats.index: stats.drop('제휴', inplace=True)
+        # 제휴는 통상 보장으로 잡히지만, 여기선 보장+상품 합계로 관리되므로 보장에 넣음 (필요시 분배)
         stats.loc['제휴(수기)'] = [manual_aff_cnt, 0, manual_aff_cost, 0]
 
     stats = stats.fillna(0)
@@ -170,11 +239,19 @@ def aggregate_dual_source(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manua
 
 
 # -----------------------------------------------------------
-# MODE 2: V18.1 Dashboard Master
+# MODE 1: Legacy
+# -----------------------------------------------------------
+def run_v6_6_legacy():
+    st.title("📊 메리츠화재 DA 보고 자동화 (Legacy V6.6)")
+    st.info("ℹ️ 기존 수기 입력 모드입니다.")
+    # (코드 생략)
+
+# -----------------------------------------------------------
+# MODE 2: V18.1 Final
 # -----------------------------------------------------------
 def run_v18_0_dashboard_master():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V18.1 Final)")
-    st.markdown("🚀 **이원화 파싱 & 대시보드 고도화**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V18.1 Parsing Fix)")
+    st.markdown("🚀 **이원화 파싱 & 파일 읽기 오류 해결**")
 
     current_bojang, current_prod = 0, 0
     est_ba_18_14, est_prod_18_14 = 0, 0
@@ -211,7 +288,6 @@ def run_v18_0_dashboard_master():
         da_target_prod = target_product - sa_est_prod + da_add_target
         da_target_18 = da_target_bojang + da_target_prod
         
-        # [NEW] 목표 비율 (실적 비율 아님)
         target_ratio_ba = da_target_bojang / da_target_18 if da_target_18 > 0 else 0.898
         
         if active_member > 0:
@@ -286,19 +362,6 @@ def run_v18_0_dashboard_master():
     current_mul = time_multipliers.get(current_time_str, 1.35)
     est_final_live = int(current_total * current_mul)
 
-    # --- 목표 배분 로직 (공통) ---
-    hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
-    weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09]
-    gap = da_target_18 - start_resource_10
-    total_w = sum(weights)
-    acc_res = [start_resource_10]
-    for w in weights[1:]:
-        acc_res.append(acc_res[-1] + round(gap * (w / total_w)))
-    acc_res[-1] = da_target_18
-    
-    hourly_get = [0] + [acc_res[i]-acc_res[i-1] for i in range(1, len(acc_res))]
-    per_person_target = [round(x/active_member, 1) if active_member else 0 for x in acc_res]
-
     # --- 탭 출력 ---
     tab0, tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근"])
 
@@ -315,8 +378,16 @@ def run_v18_0_dashboard_master():
         
         col_d1, col_d2 = st.columns([1, 1])
         with col_d1:
-            st.markdown("##### 📌 시간대별 목표 상세 (요청사항)")
-            # [New] 대시보드용 상세 목표 표
+            st.markdown("##### 📌 시간대별 목표 상세")
+            hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
+            weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09]
+            gap = da_target_18 - start_resource_10
+            total_w = sum(weights)
+            acc_res = [start_resource_10]
+            for w in weights[1:]:
+                acc_res.append(acc_res[-1] + round(gap * (w / total_w)))
+            acc_res[-1] = da_target_18
+            
             df_dash_goal = pd.DataFrame({
                 '누적 목표': [f"{x:,}" for x in acc_res],
                 '보장 목표': [f"{int(x * target_ratio_ba):,}" for x in acc_res],
@@ -335,10 +406,11 @@ def run_v18_0_dashboard_master():
 
     with tab1:
         st.subheader("📋 오전 목표 수립")
-        
         st.line_chart(pd.DataFrame({'목표 흐름': acc_res}, index=hours))
         
-        # [수정] 인당 배분 추가
+        hourly_get = [0] + [acc_res[i]-acc_res[i-1] for i in range(1, len(acc_res))]
+        per_person_target = [round(x/active_member, 1) if active_member else 0 for x in acc_res]
+        
         df_plan = pd.DataFrame({
             '누적 목표(건)': [f"{x:,}" for x in acc_res],
             '인당 배분(건)': per_person_target,
@@ -346,7 +418,6 @@ def run_v18_0_dashboard_master():
         }, index=hours)
         st.table(df_plan.T)
         
-        # [수정] 17시 목표 계산에 target_ratio_ba 사용
         report_morning = f"""금일 DA+제휴파트 예상마감 공유드립니다.
 
 [17시 기준]
@@ -411,7 +482,6 @@ def run_v18_0_dashboard_master():
 
 def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
-    # V18.1이 최신 버전으로 기본 선택됨
     version = st.sidebar.selectbox("버전 선택", ["V18.1 (Final)", "V6.6 (Legacy)"])
     if version == "V18.1 (Final)": run_v18_0_dashboard_master()
     else: run_v6_6_legacy()
