@@ -11,7 +11,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V18.35 (RuleBase)", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V18.35 Final", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -32,7 +32,7 @@ set_korean_font()
 # 1. 유틸리티 및 데이터 처리 함수
 # -----------------------------------------------------------
 def clean_currency(x):
-    """쉼표 제거 및 숫자 변환 (Safe Float Conversion)"""
+    """쉼표 제거 및 숫자 변환 (강화됨: int/float/str 모두 처리)"""
     if pd.isna(x) or x == '':
         return 0.0
     if isinstance(x, (int, float)):
@@ -74,53 +74,38 @@ def get_media_from_plab(row):
 
 def load_file_by_rule(file):
     """
-    [핵심] 파일명 기반 맞춤형 읽기 로직
+    [핵심] 파일명 기반 맞춤형 읽기 로직 (인코딩/구분자 자동 해결)
     """
     name = file.name
     file.seek(0)
     
-    # 1. 엑셀 파일 (.xlsx, .xls) 처리
+    # 1. 엑셀 파일 처리
     if name.endswith(('.xlsx', '.xls')):
         try:
             return pd.read_excel(file, engine='openpyxl')
         except Exception as e:
-            # 엑셀 읽기 실패 시 에러 반환하지 않고 None 처리 후 로그
             st.error(f"엑셀 파일 읽기 실패 ({name}): {e}")
             return None
 
-    # 2. CSV 파일 처리 (파일명별 규칙 적용)
-    
-    # (A) 구글 캠페인 보고서: 보통 UTF-16, Tab 구분, Header=2
-    if '캠페인 보고서' in name:
-        try:
-            return pd.read_csv(file, sep='\t', encoding='utf-16', header=2, on_bad_lines='skip')
-        except:
-            try:
-                file.seek(0)
-                return pd.read_csv(file, sep='\t', encoding='utf-8-sig', header=2, on_bad_lines='skip')
-            except:
-                pass # 아래 공통 로직으로 넘어감
+    # 2. CSV 파일 처리 (규칙 적용)
+    try:
+        if '캠페인 보고서' in name: # 구글
+            try: return pd.read_csv(file, sep='\t', encoding='utf-16', header=2, on_bad_lines='skip')
+            except: return pd.read_csv(file, sep='\t', encoding='utf-8-sig', header=2, on_bad_lines='skip')
 
-    # (B) 카카오: 보통 Tab 구분
-    elif '메리츠화재다이렉트' in name:
-        try:
-            return pd.read_csv(file, sep='\t', encoding='utf-8', on_bad_lines='skip')
-        except:
-            try:
-                file.seek(0)
-                return pd.read_csv(file, sep='\t', encoding='cp949', on_bad_lines='skip')
-            except:
-                pass
+        elif '메리츠화재다이렉트' in name: # 카카오
+            try: return pd.read_csv(file, sep='\t', encoding='utf-8', on_bad_lines='skip')
+            except: return pd.read_csv(file, sep='\t', encoding='cp949', on_bad_lines='skip')
 
-    # (C) 토스: Header=3
-    elif '메리츠 화재' in name and '통합' in name:
-        try:
-            return pd.read_csv(file, header=3, encoding='utf-8', on_bad_lines='skip')
-        except:
-            pass
+        elif '메리츠 화재' in name: # 토스 (통합 or 시간대별)
+            # 헤더가 3행(index 3)에 있음
+            try: return pd.read_csv(file, header=3, encoding='utf-8', on_bad_lines='skip')
+            except: return pd.read_csv(file, header=3, encoding='cp949', on_bad_lines='skip')
+            
+    except:
+        pass
 
-    # 3. 규칙에 안 맞거나 실패한 경우 (공통/안전장치)
-    # 여러 인코딩 순차 시도
+    # 3. 공통/Fallback 로직 (여러 인코딩 시도)
     encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-16', 'utf-8-sig']
     separators = [',', '\t']
     
@@ -129,26 +114,22 @@ def load_file_by_rule(file):
             try:
                 file.seek(0)
                 df = pd.read_csv(file, encoding=enc, sep=sep, on_bad_lines='skip')
-                # 읽히긴 했는데 컬럼이 1개면 구분자가 틀린 것 (간이 체크)
-                if len(df.columns) > 1:
-                    return df
-            except:
-                continue
+                if len(df.columns) > 1: return df
+            except: continue
                 
     st.error(f"❌ 파일 형식을 인식할 수 없습니다: {name}")
     return None
 
 def process_marketing_data(uploaded_files):
-    """파일명 기반 통합 로직"""
+    """파일명 기반 통합 로직 (토스 중복 처리 개선)"""
     dfs = []
+    toss_files = [] # 토스 파일 별도 관리
     
     for file in uploaded_files:
         filename = file.name
-        # 파일명 규칙에 따라 일단 데이터프레임으로 로드
         df = load_file_by_rule(file)
         
-        if df is None:
-            continue
+        if df is None: continue
             
         try:
             # 1. 네이버
@@ -169,17 +150,9 @@ def process_marketing_data(uploaded_files):
                 grouped['보장'] = 0
                 dfs.append(grouped)
 
-            # 3. 토스
-            elif '메리츠 화재' in filename and '통합' in filename:
-                if '캠페인 명' in df.columns:
-                     df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
-                
-                df['Cost'] = df['소진 비용'].apply(clean_currency) * 1.1
-                df['상품'] = df['캠페인 명'].apply(classify_product)
-                df['매체'] = '토스'
-                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
-                grouped['보장'] = 0
-                dfs.append(grouped)
+            # 3. 토스 (일단 리스트에 모음)
+            elif '메리츠 화재' in filename:
+                toss_files.append((filename, df))
 
             # 4. 구글
             elif '캠페인 보고서' in filename:
@@ -196,12 +169,9 @@ def process_marketing_data(uploaded_files):
                 grouped['보장'] = 0
                 dfs.append(grouped)
 
-            # 5. 피랩 (엑셀로 들어옴)
+            # 5. 피랩
             elif 'Performance Lab' in filename:
-                # 엑셀 컬럼명 공백 제거
                 df.columns = df.columns.str.strip()
-                
-                # 피랩은 컬럼명이 영어/한글 섞일 수 있으므로 유연하게 처리
                 send_col = next((c for c in df.columns if 'METIS전송' in c and '율' not in c), None)
                 fail_col = next((c for c in df.columns if 'METIS실패' in c), None)
                 re_col = next((c for c in df.columns if 'METIS재인입' in c), None)
@@ -224,6 +194,28 @@ def process_marketing_data(uploaded_files):
         except Exception as e:
             st.error(f"❌ 데이터 파싱 중 오류 ({filename}): {e}")
             continue
+
+    # [토스 파일 후처리]
+    # '통합' 파일이 있으면 그것만 사용, 없으면 모든 토스 파일 합산
+    if toss_files:
+        toss_total_file = next((item for item in toss_files if '통합' in item[0]), None)
+        
+        target_toss_files = [toss_total_file] if toss_total_file else toss_files
+        
+        for fname, df in target_toss_files:
+            try:
+                # 합계 행 제거
+                if '캠페인 명' in df.columns:
+                     df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
+                
+                df['Cost'] = df['소진 비용'].apply(clean_currency) * 1.1
+                df['상품'] = df['캠페인 명'].apply(classify_product)
+                df['매체'] = '토스'
+                grouped = df.groupby(['매체', '상품'])['Cost'].sum().reset_index()
+                grouped['보장'] = 0
+                dfs.append(grouped)
+            except Exception as e:
+                st.error(f"❌ 토스 파일 처리 오류 ({fname}): {e}")
 
     if not dfs:
         return None
@@ -290,8 +282,8 @@ def convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, m
 # MODE: V18.35 Master
 # -----------------------------------------------------------
 def run_v18_35_master():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Fixed)")
-    st.markdown("🚀 **파일명 기반 인식 & 엑셀/CSV 구분 로직 적용**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Final)")
+    st.markdown("🚀 **토스 비용 & 파일 인식 완벽 대응 패치**")
 
     # 변수 초기화
     current_bojang, current_prod = 0, 0
@@ -331,7 +323,6 @@ def run_v18_35_master():
         start_resource_10 = st.number_input("10시 자원", value=1100)
 
         st.header("4. [실시간] 분석")
-        # 파일 업로더
         uploaded_realtime = st.file_uploader("실시간 파일 (파일명 자동 인식)", accept_multiple_files=True)
         
         st.markdown("**✏️ 수기 입력 (제휴)**")
