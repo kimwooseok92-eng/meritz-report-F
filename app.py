@@ -99,8 +99,6 @@ def analyze_data(df):
     df['media_group'] = df['campaign'].apply(normalize_media)
     
     pivot_cnt = df.pivot_table(index='media_group', columns='type', values='count', aggfunc='sum', fill_value=0)
-    pivot_cost = df.pivot_table(index='media_group', columns='type', values='cost', aggfunc='sum', fill_value=0)
-    
     pivot_cnt.columns = [f"현재_{c}" for c in pivot_cnt.columns]
     
     media_cost = df.pivot_table(index='media_group', values='cost', aggfunc='sum', fill_value=0)
@@ -114,8 +112,8 @@ def analyze_data(df):
 # -----------------------------------------------------------
 # 3. 웹사이트 UI & 사이드바
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V6.5", layout="wide")
-st.title("📊 메리츠화재 DA 보고 자동화 (V6.5)")
+st.set_page_config(page_title="메리츠 보고 자동화 V6.6", layout="wide")
+st.title("📊 메리츠화재 DA 보고 자동화 (V6.6)")
 
 with st.sidebar:
     st.header("1. 기본 설정")
@@ -193,20 +191,16 @@ with st.sidebar:
 # 4. 핵심 로직
 # -----------------------------------------------------------
 def generate_report():
-    # A. Multiplier 계산
     w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
     if fixed_ad_type != "없음": 
         if day_option == '월': w = 0.90 
         else: w = max(w, 1.0)
 
-    # 14시 예측용 계수
     if "12시" in fixed_ad_type: mul_14 = 1.215 
     else: mul_14 = 1.35 * w 
-
-    # 16시 예측용 계수 (1/0.91 = 약 1.098)
+    
     mul_16 = 1.099 
 
-    # B. 전체 목표
     da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
     da_per_18 = round(da_target_18 / active_member, 1)
     
@@ -214,13 +208,10 @@ def generate_report():
     da_target_17 = da_target_18 - round(da_target_18 * gap_percent)
     da_per_17 = round(da_target_17 / active_member, 1)
     
-    # C. 전체 예측 (14시 기준)
     est_18_from_14 = int(current_total * mul_14)
-    # Range 보정
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
-    # D. 비율 결정
     if uploaded_realtime and real_data['total_cnt'] > 0:
         ratio_ba = real_data['ratio_ba']
     else:
@@ -228,27 +219,20 @@ def generate_report():
         elif op_mode == '효율화': ratio_ba = 0.12
         else: ratio_ba = 0.102
 
-    # E. 매체별 대시보드 생성 (14시용 / 16시용 분리)
     dash_14, dash_16 = pd.DataFrame(), pd.DataFrame()
-    
     if not real_data['media_stats'].empty:
-        # 14시 대시보드
+        # 14시용
         d14 = real_data['media_stats'].copy()
         for col in d14.columns:
-            if '건수' in col:
-                d14[col.replace('현재', '예상')] = (d14[col] * mul_14).astype(int)
-        cols14 = sorted(d14.columns.tolist())
-        dash_14 = d14[cols14]
+            if '건수' in col: d14[col.replace('현재', '예상')] = (d14[col] * mul_14).astype(int)
+        dash_14 = d14[sorted(d14.columns.tolist())]
 
-        # 16시 대시보드
+        # 16시용
         d16 = real_data['media_stats'].copy()
         for col in d16.columns:
-            if '건수' in col:
-                d16[col.replace('현재', '예상')] = (d16[col] * mul_16).astype(int)
-        cols16 = sorted(d16.columns.tolist())
-        dash_16 = d16[cols16]
+            if '건수' in col: d16[col.replace('현재', '예상')] = (d16[col] * mul_16).astype(int)
+        dash_16 = d16[sorted(d16.columns.tolist())]
 
-    # F. 16시 예측 (전체)
     est_18_from_16 = int(current_total * mul_16)
     remaining_gap = est_18_from_16 - current_total
     if remaining_gap < 150: remaining_gap = 150
@@ -257,7 +241,6 @@ def generate_report():
     last_spurt_ba = int(remaining_gap * 0.9) 
     last_spurt_prod = remaining_gap - last_spurt_ba
 
-    # G. 멘트 및 CPA
     fixed_msg = f"금일 {fixed_content}." if fixed_ad_type != "없음" else "금일 특이사항 없이 운영 중이며,"
     
     if est_18_from_14 >= da_target_18:
@@ -276,7 +259,6 @@ def generate_report():
 
     est_cost_24 = int(cost_total * 1.8)
 
-    # H. 명일 예측
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
@@ -364,7 +346,7 @@ with tab2:
         highlight_cols = [c for c in res['dash_14'].columns if '예상' in c]
         st.dataframe(res['dash_14'].style.background_gradient(cmap='Blues', subset=highlight_cols).format("{:,}"), use_container_width=True)
     elif uploaded_realtime:
-        st.error("⚠️ 데이터를 읽지 못했습니다.")
+        st.error("⚠️ 데이터를 읽지 못했습니다. 컬럼명을 확인해주세요.")
     else:
         st.info("📂 로우데이터 업로드 시 매체별 상세 예측이 표시됩니다.")
 
@@ -395,11 +377,16 @@ with tab2:
 with tab3:
     st.subheader("⚠️ 16:00 마감 임박 보고")
     
-    # [FIX] 16시 전용 대시보드 (dash_16) 표시
+    # [FIXED] 16시 대시보드 강제 노출 로직
     if not res['dash_16'].empty:
         st.markdown("#### 📊 매체별 운영 현황 (16시 기준 예상)")
+        # 16시 테마는 초록색(Greens)
         highlight_cols = [c for c in res['dash_16'].columns if '예상' in c]
         st.dataframe(res['dash_16'].style.background_gradient(cmap='Greens', subset=highlight_cols).format("{:,}"), use_container_width=True)
+    elif uploaded_realtime:
+        st.error("⚠️ 데이터를 읽지 못했습니다.")
+    else:
+        st.info("📂 로우데이터를 업로드하면 16시 기준 상세 예측 대시보드가 표시됩니다.")
 
     report_1600 = f"""DA파트 금일 16시간 현황 전달드립니다.
 
