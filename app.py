@@ -3,7 +3,7 @@ import pandas as pd
 import platform
 import io
 import warnings
-import unicodedata
+import openpyxl
 
 # 경고 메시지 무시
 warnings.simplefilter("ignore")
@@ -72,59 +72,82 @@ def get_media_from_plab(row):
 
     return '기타'
 
+def load_excel_ignore_styles(file):
+    """
+    [강력한 엑셀 로더] 
+    openpyxl을 직접 사용하여 스타일(Fill, Font 등) 오류를 무시하고 '값'만 읽어옴
+    """
+    try:
+        file.seek(0)
+        # read_only=True: 스타일 무시하고 빠르게 읽음
+        # data_only=True: 수식 대신 결과값 읽음
+        wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
+        ws = wb.active
+        
+        # Generator to list
+        data = list(ws.values)
+        if not data:
+            return None
+            
+        # 첫 번째 행을 헤더로 가정
+        cols = data[0]
+        rows = data[1:]
+        
+        # DataFrame 생성
+        df = pd.DataFrame(rows, columns=cols)
+        return df
+    except Exception as e:
+        # 이마저도 실패하면 None 반환
+        return None
+
 def load_file_by_rule(file):
-    """
-    [핵심] 파일명 기반 맞춤형 읽기 로직 (엑셀/CSV 자동 대응)
-    """
+    """파일명 기반 맞춤형 읽기 로직"""
     name = file.name
     file.seek(0)
     
-    # -------------------------------------------------------
     # 1. 엑셀 파일 (.xlsx, .xls) 처리
-    # -------------------------------------------------------
     if name.endswith(('.xlsx', '.xls')):
+        # [규칙 A] 토스 엑셀: Header=3
+        if '메리츠 화재' in name:
+            try: return pd.read_excel(file, engine='openpyxl', header=3)
+            except: pass # 실패시 아래 로직으로
+
+        # [규칙 B] 일반 엑셀 (피랩 포함): 스타일 무시 로더 사용
+        df = load_excel_ignore_styles(file)
+        if df is not None:
+            return df
+        
+        # 실패 시 기본 로더 재시도 (혹시 모르니)
         try:
-            # [규칙 A] 토스 엑셀 파일은 Header가 4번째 줄(Index 3)에 있음
-            if '메리츠 화재' in name:
-                df = pd.read_excel(file, engine='openpyxl', header=3)
-                return df
-            
-            # [규칙 B] 일반 엑셀 파일 (피랩 등)
-            # data_only=True: 수식이 아닌 값만 읽음 (스타일 에러 방지)
-            return pd.read_excel(file, engine='openpyxl', data_only=True)
-            
-        except Exception as e:
-            # 엑셀 읽기 실패 시 (스타일 에러 등) -> CSV로 시도 (확장자만 xlsx인 경우 대비)
+            file.seek(0)
+            return pd.read_excel(file, engine='openpyxl')
+        except:
+            # 확장자만 xlsx인 CSV일 수도 있음
             try:
                 file.seek(0)
                 return pd.read_csv(file, on_bad_lines='skip')
             except:
-                st.error(f"❌ 엑셀 파일 읽기 실패 ({name}): {e}\n(파일을 열어서 '다른 이름으로 저장 -> CSV'로 저장 후 올려보세요)")
+                st.error(f"❌ 엑셀 파일 읽기 실패 ({name}). 스타일 오류일 가능성이 높으니 CSV로 저장해 주세요.")
                 return None
 
-    # -------------------------------------------------------
     # 2. CSV 파일 처리
-    # -------------------------------------------------------
     try:
-        # [규칙 C] 구글 캠페인 보고서 (UTF-16, Tab, Header=2)
-        if '캠페인 보고서' in name: 
+        if '캠페인 보고서' in name: # 구글
             try: return pd.read_csv(file, sep='\t', encoding='utf-16', header=2, on_bad_lines='skip')
             except: return pd.read_csv(file, sep='\t', encoding='utf-8-sig', header=2, on_bad_lines='skip')
 
-        # [규칙 D] 카카오 (Tab 구분)
-        elif '메리츠화재다이렉트' in name: 
+        elif '메리츠화재다이렉트' in name: # 카카오
             try: return pd.read_csv(file, sep='\t', encoding='utf-8', on_bad_lines='skip')
             except: return pd.read_csv(file, sep='\t', encoding='cp949', on_bad_lines='skip')
 
-        # [규칙 E] 토스 CSV (Header=3)
-        elif '메리츠 화재' in name: 
+        elif '메리츠 화재' in name: # 토스
             try: return pd.read_csv(file, header=3, encoding='utf-8', on_bad_lines='skip')
             except: return pd.read_csv(file, header=3, encoding='cp949', on_bad_lines='skip')
             
     except:
         pass
 
-    # 3. 공통 Fallback (인코딩 순차 시도)
+    # 3. 공통 Fallback
     encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-16', 'utf-8-sig']
     separators = [',', '\t']
     
@@ -139,6 +162,28 @@ def load_file_by_rule(file):
     st.error(f"❌ 파일 형식을 인식할 수 없습니다: {name}")
     return None
 
+def find_header_and_reload(df, target_col):
+    """
+    DataFrame에서 target_col이 보이지 않을 경우, 
+    데이터 내에서 해당 컬럼명을 찾아 헤더를 재설정
+    """
+    # 이미 존재하면 리턴
+    if target_col in df.columns:
+        return df
+
+    # 전체 데이터 중 target_col이 포함된 행 찾기
+    for idx, row in df.head(10).iterrows():
+        # 행 값들을 문자열로 변환하여 확인
+        row_values = [str(x).strip() for x in row.values]
+        if target_col in row_values:
+            # 해당 행을 컬럼으로 설정
+            new_columns = row_values
+            new_df = df.iloc[idx+1:].copy()
+            new_df.columns = new_columns
+            return new_df
+    
+    return df
+
 def process_marketing_data(uploaded_files):
     """파일명 기반 통합 로직"""
     dfs = []
@@ -150,7 +195,7 @@ def process_marketing_data(uploaded_files):
         
         if df is None: continue
         
-        # 컬럼 공백 제거 (매우 중요)
+        # 컬럼 공백 제거
         df.columns = df.columns.astype(str).str.strip()
             
         try:
@@ -217,18 +262,21 @@ def process_marketing_data(uploaded_files):
             continue
 
     # [토스 파일 후처리]
-    # '통합' 파일이 있으면 그것만 사용, 없으면 시간대별 파일 합산
+    # '통합' 파일 우선, 없으면 개별 파일 합산
     if toss_files:
         toss_total_file = next((item for item in toss_files if '통합' in item[0]), None)
         target_toss_files = [toss_total_file] if toss_total_file else toss_files
         
         for fname, df in target_toss_files:
             try:
+                # [헤더 자동 보정] '소진 비용' 컬럼이 없으면 찾아서 헤더 재설정
+                if '소진 비용' not in df.columns:
+                    df = find_header_and_reload(df, '소진 비용')
+
                 # 합계 행 제거
                 if '캠페인 명' in df.columns:
                      df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
                 
-                # 컬럼 존재 여부 확인
                 if '소진 비용' in df.columns:
                     df['Cost'] = df['소진 비용'].apply(clean_currency) * 1.1
                     df['상품'] = df['캠페인 명'].apply(classify_product)
@@ -238,6 +286,7 @@ def process_marketing_data(uploaded_files):
                     dfs.append(grouped)
                 else:
                     st.warning(f"⚠️ 토스 파일에 '소진 비용' 컬럼이 없습니다: {fname}")
+                    st.write(f"인식된 컬럼: {list(df.columns)}") # 디버깅용
             except Exception as e:
                 st.error(f"❌ 토스 파일 처리 오류 ({fname}): {e}")
 
@@ -307,7 +356,7 @@ def convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, m
 # -----------------------------------------------------------
 def run_v18_35_master():
     st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Final)")
-    st.markdown("🚀 **에러 완전 해결 (스타일 무시 & 헤더 자동보정)**")
+    st.markdown("🚀 **스타일 무시 & 헤더 자동보정 적용 완료**")
 
     # 변수 초기화
     current_bojang, current_prod = 0, 0
