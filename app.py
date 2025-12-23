@@ -3,7 +3,9 @@ import pandas as pd
 import platform
 import io
 import warnings
-import openpyxl
+import zipfile
+import xml.etree.ElementTree as ET
+import re
 
 # 경고 메시지 무시
 warnings.simplefilter("ignore")
@@ -11,7 +13,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V18.35 Final", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V18.35 Ultimate", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -72,32 +74,81 @@ def get_media_from_plab(row):
 
     return '기타'
 
-def load_excel_ignore_styles(file):
+def load_excel_xml_fallback(file):
     """
-    [강력한 엑셀 로더] 
-    openpyxl을 직접 사용하여 스타일(Fill, Font 등) 오류를 무시하고 '값'만 읽어옴
+    [최후의 수단] 엑셀 파일을 Zip으로 열어서 XML 데이터를 직접 파싱.
+    openpyxl 라이브러리의 스타일 에러를 100% 우회함.
     """
     try:
         file.seek(0)
-        # read_only=True: 스타일 무시하고 빠르게 읽음
-        # data_only=True: 수식 대신 결과값 읽음
-        wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
-        ws = wb.active
+        z = zipfile.ZipFile(file)
         
-        # Generator to list
-        data = list(ws.values)
-        if not data:
-            return None
+        # 1. Shared Strings 추출 (엑셀은 문자열을 별도 XML에 저장함)
+        strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            with z.open('xl/sharedStrings.xml') as f:
+                tree = ET.parse(f)
+                root = tree.getroot()
+                # 네임스페이스 처리
+                ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                for si in root.findall('ns:si', ns):
+                    t = si.find('ns:t', ns)
+                    if t is not None and t.text:
+                        strings.append(t.text)
+                    else:
+                        # 여러 서식이 섞인 경우 <r><t>...
+                        text_parts = []
+                        for r in si.findall('ns:r', ns):
+                            rt = r.find('ns:t', ns)
+                            if rt is not None and rt.text:
+                                text_parts.append(rt.text)
+                        strings.append("".join(text_parts))
+        
+        # 2. 첫 번째 시트 데이터 추출
+        # 보통 xl/worksheets/sheet1.xml에 있음
+        sheet_path = 'xl/worksheets/sheet1.xml'
+        if sheet_path not in z.namelist():
+             # sheet1이 없으면 sheet로 시작하는 첫번째 파일 찾기
+             sheets = [n for n in z.namelist() if n.startswith('xl/worksheets/sheet')]
+             if sheets: sheet_path = sheets[0]
+             else: return None
+
+        with z.open(sheet_path) as f:
+            tree = ET.parse(f)
+            root = tree.getroot()
+            ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
             
-        # 첫 번째 행을 헤더로 가정
-        cols = data[0]
-        rows = data[1:]
+            data = []
+            for row in root.findall('ns:sheetData/ns:row', ns):
+                row_data = []
+                cells = row.findall('ns:c', ns)
+                for c in cells:
+                    t = c.get('t') # 데이터 타입
+                    v_tag = c.find('ns:v', ns)
+                    val = v_tag.text if v_tag is not None else None
+                    
+                    if t == 's' and val is not None: # Shared String 참조
+                        try:
+                            val = strings[int(val)]
+                        except:
+                            val = ""
+                    elif t == 'inlineStr': # 인라인 문자열
+                        is_tag = c.find('ns:is', ns)
+                        if is_tag is not None:
+                            t_tag = is_tag.find('ns:t', ns)
+                            val = t_tag.text if t_tag is not None else ""
+                    
+                    row_data.append(val)
+                data.append(row_data)
         
-        # DataFrame 생성
-        df = pd.DataFrame(rows, columns=cols)
+        if not data: return None
+        
+        # 첫 줄을 헤더로
+        df = pd.DataFrame(data[1:], columns=data[0])
         return df
+
     except Exception as e:
-        # 이마저도 실패하면 None 반환
+        # st.error(f"XML 파싱 실패: {e}")
         return None
 
 def load_file_by_rule(file):
@@ -105,32 +156,35 @@ def load_file_by_rule(file):
     name = file.name
     file.seek(0)
     
+    # -------------------------------------------------------
     # 1. 엑셀 파일 (.xlsx, .xls) 처리
+    # -------------------------------------------------------
     if name.endswith(('.xlsx', '.xls')):
         # [규칙 A] 토스 엑셀: Header=3
         if '메리츠 화재' in name:
             try: return pd.read_excel(file, engine='openpyxl', header=3)
-            except: pass # 실패시 아래 로직으로
+            except: pass
 
-        # [규칙 B] 일반 엑셀 (피랩 포함): 스타일 무시 로더 사용
-        df = load_excel_ignore_styles(file)
-        if df is not None:
-            return df
-        
-        # 실패 시 기본 로더 재시도 (혹시 모르니)
+        # [규칙 B] Performance Lab 등 일반 엑셀
         try:
-            file.seek(0)
             return pd.read_excel(file, engine='openpyxl')
-        except:
-            # 확장자만 xlsx인 CSV일 수도 있음
+        except Exception:
+            # 실패 시 XML 강제 파싱 (스타일 에러 해결)
+            df_force = load_excel_xml_fallback(file)
+            if df_force is not None:
+                return df_force
+            
+            # 그것도 안되면 CSV로 시도
             try:
                 file.seek(0)
                 return pd.read_csv(file, on_bad_lines='skip')
             except:
-                st.error(f"❌ 엑셀 파일 읽기 실패 ({name}). 스타일 오류일 가능성이 높으니 CSV로 저장해 주세요.")
+                st.error(f"❌ 파일 읽기 실패 ({name}). 파일이 손상되었거나 암호가 걸려있을 수 있습니다.")
                 return None
 
+    # -------------------------------------------------------
     # 2. CSV 파일 처리
+    # -------------------------------------------------------
     try:
         if '캠페인 보고서' in name: # 구글
             try: return pd.read_csv(file, sep='\t', encoding='utf-16', header=2, on_bad_lines='skip')
@@ -163,31 +217,22 @@ def load_file_by_rule(file):
     return None
 
 def find_header_and_reload(df, target_col):
-    """
-    DataFrame에서 target_col이 보이지 않을 경우, 
-    데이터 내에서 해당 컬럼명을 찾아 헤더를 재설정
-    """
-    # 이미 존재하면 리턴
-    if target_col in df.columns:
-        return df
-
-    # 전체 데이터 중 target_col이 포함된 행 찾기
+    """헤더 자동 보정"""
+    if target_col in df.columns: return df
+    
+    # 상위 10행에서 컬럼명 탐색
     for idx, row in df.head(10).iterrows():
-        # 행 값들을 문자열로 변환하여 확인
         row_values = [str(x).strip() for x in row.values]
         if target_col in row_values:
-            # 해당 행을 컬럼으로 설정
-            new_columns = row_values
             new_df = df.iloc[idx+1:].copy()
-            new_df.columns = new_columns
+            new_df.columns = row_values
             return new_df
-    
     return df
 
 def process_marketing_data(uploaded_files):
     """파일명 기반 통합 로직"""
     dfs = []
-    toss_files = [] # 토스 파일 별도 수집
+    toss_files = [] 
     
     for file in uploaded_files:
         filename = file.name
@@ -237,7 +282,7 @@ def process_marketing_data(uploaded_files):
 
             # 5. 피랩
             elif 'Performance Lab' in filename:
-                # 유연한 컬럼 찾기
+                # 유연한 컬럼 찾기 (XML 파싱시 컬럼명이 정확하지 않을 수 있어 '포함' 조건 사용)
                 send_col = next((c for c in df.columns if 'METIS전송' in c and '율' not in c), None)
                 fail_col = next((c for c in df.columns if 'METIS실패' in c), None)
                 re_col = next((c for c in df.columns if 'METIS재인입' in c), None)
@@ -269,11 +314,10 @@ def process_marketing_data(uploaded_files):
         
         for fname, df in target_toss_files:
             try:
-                # [헤더 자동 보정] '소진 비용' 컬럼이 없으면 찾아서 헤더 재설정
+                # [헤더 자동 보정]
                 if '소진 비용' not in df.columns:
                     df = find_header_and_reload(df, '소진 비용')
 
-                # 합계 행 제거
                 if '캠페인 명' in df.columns:
                      df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
                 
@@ -286,7 +330,6 @@ def process_marketing_data(uploaded_files):
                     dfs.append(grouped)
                 else:
                     st.warning(f"⚠️ 토스 파일에 '소진 비용' 컬럼이 없습니다: {fname}")
-                    st.write(f"인식된 컬럼: {list(df.columns)}") # 디버깅용
             except Exception as e:
                 st.error(f"❌ 토스 파일 처리 오류 ({fname}): {e}")
 
@@ -355,8 +398,8 @@ def convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, m
 # MODE: V18.35 Master
 # -----------------------------------------------------------
 def run_v18_35_master():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Final)")
-    st.markdown("🚀 **스타일 무시 & 헤더 자동보정 적용 완료**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Ultimate)")
+    st.markdown("🚀 **스타일 오류 완벽 대응 (XML 강제 파싱)**")
 
     # 변수 초기화
     current_bojang, current_prod = 0, 0
