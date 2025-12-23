@@ -6,7 +6,7 @@ import io
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V15.1", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V15.3", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -24,102 +24,119 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (스마트 파서 업데이트)
+# 1. 유틸리티 함수 (Ultra Smart Parser)
 # -----------------------------------------------------------
 def parse_uploaded_files(files):
     combined_df = pd.DataFrame()
     
-    # 우리가 찾고 싶은 핵심 키워드 (헤더 찾기용)
+    # 이 단어들이 포함된 줄을 '진짜 헤더'로 간주합니다.
     target_cols = ['비용', '소진', 'Cost', '금액', '캠페인', 'Campaign', '광고명', '매체']
 
     for file in files:
         df = None
-        try:
-            # A. CSV 파일 처리 (탭/쉼표/인코딩/헤더위치 자동 탐지)
-            if file.name.endswith('.csv'):
-                # 1단계: 인코딩 & 구분자 조합 시도
-                encodings = ['utf-8-sig', 'cp949', 'euc-kr']
-                separators = [',', '\t']
-                
-                for enc in encodings:
-                    if df is not None: break
-                    for sep in separators:
-                        try:
-                            file.seek(0)
-                            # 일단 읽어보기
-                            temp_df = pd.read_csv(file, encoding=enc, sep=sep)
+        
+        # --- A. CSV / TXT 파일 처리 ---
+        if file.name.lower().endswith(('.csv', '.txt')):
+            # 인코딩과 구분자를 다양하게 시도
+            encodings = ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
+            separators = [',', '\t'] # 쉼표와 탭(Tab) 둘 다 시도
+            
+            for enc in encodings:
+                if df is not None: break
+                for sep in separators:
+                    try:
+                        file.seek(0)
+                        # 1. 일단 그냥 읽어보기 (헤더가 첫 줄인 경우)
+                        temp_df = pd.read_csv(file, encoding=enc, sep=sep, on_bad_lines='skip')
+                        
+                        # 키워드가 컬럼에 있으면 성공
+                        if any(k in str(c) for c in temp_df.columns for k in target_cols):
+                            df = temp_df
+                            break
+                        
+                        # 2. 헤더가 아래에 숨어있는 경우 (메타데이터 스킵)
+                        # 상위 20줄을 훑어서 키워드가 있는 줄을 찾음
+                        file.seek(0)
+                        lines = file.readlines()
+                        header_row_idx = -1
+                        
+                        for idx, line in enumerate(lines[:20]):
+                            try:
+                                line_str = line.decode(enc)
+                            except:
+                                continue
                             
-                            # 데이터가 1열 이상이고, 우리가 아는 키워드가 하나라도 있으면 성공
-                            if len(temp_df.columns) > 1:
-                                # 헤더가 첫 줄에 없을 수도 있으니 확인
-                                is_valid = False
-                                # 컬럼명 자체에 키워드가 있는지
-                                if any(k in str(c) for c in temp_df.columns for k in target_cols):
-                                    df = temp_df
-                                    break
-                                # 아니라면 상위 10줄 안에 키워드가 있는지 확인 (Metadata skip)
-                                else:
-                                    for i in range(10):
-                                        if i >= len(temp_df): break
-                                        row_vals = temp_df.iloc[i].astype(str).values
-                                        if any(k in v for v in row_vals for k in target_cols):
-                                            # i+1 번째 줄이 헤더임. 다시 읽기
-                                            file.seek(0)
-                                            df = pd.read_csv(file, encoding=enc, sep=sep, header=i+1)
-                                            break
-                                    if df is not None: break
-                        except: continue
-
-            # B. 엑셀 파일 처리
-            else:
-                try:
-                    # openpyxl 엔진 시도
-                    df = pd.read_excel(file)
-                except Exception as e:
-                    # 엔진 없을 경우 기본값 시도 또는 경고
-                    st.warning(f"⚠️ '{file.name}' 읽기 실패. (openpyxl 라이브러리 설치 권장)")
-                    continue
-                
-                # 엑셀도 상단에 이상한 제목이 있을 수 있으니 헤더 찾기
-                if df is not None:
-                    # 컬럼에 키워드 없으면 아래로 훑기
-                    if not any(k in str(c) for c in df.columns for k in target_cols):
-                        for i in range(10):
-                            if i >= len(df): break
-                            # i번째 행을 확인
-                            row_vals = df.iloc[i].astype(str).values
-                            if any(k in v for v in row_vals for k in target_cols):
-                                df.columns = df.iloc[i] # 컬럼명 덮어쓰기
-                                df = df.iloc[i+1:].reset_index(drop=True) # 데이터 자르기
+                            if any(k in line_str for k in target_cols):
+                                header_row_idx = idx
                                 break
+                        
+                        if header_row_idx != -1:
+                            file.seek(0)
+                            df = pd.read_csv(file, encoding=enc, sep=sep, header=header_row_idx, on_bad_lines='skip')
+                            break
 
-            # C. 데이터 병합
-            if df is not None:
-                # 컬럼명 정규화 (공백 제거 등)
+                    except Exception:
+                        continue
+
+        # --- B. 엑셀 파일 처리 ---
+        elif file.name.lower().endswith(('.xlsx', '.xls')):
+            try:
+                # 엑셀 읽기 (openpyxl 필요)
+                file.seek(0)
+                temp_df = pd.read_excel(file)
+                
+                # 키워드가 컬럼에 있으면 바로 사용
+                if any(k in str(c) for c in temp_df.columns for k in target_cols):
+                    df = temp_df
+                else:
+                    # 헤더 찾기 (위에서부터 20줄 탐색)
+                    for i in range(20):
+                        if i >= len(temp_df): break
+                        row_values = temp_df.iloc[i].astype(str).values
+                        if any(k in v for v in row_values for k in target_cols):
+                            # i번째 줄을 컬럼으로 설정
+                            new_columns = temp_df.iloc[i]
+                            df = temp_df.iloc[i+1:].copy()
+                            df.columns = new_columns
+                            df.reset_index(drop=True, inplace=True)
+                            break
+            except Exception as e:
+                st.error(f"❌ 엑셀 읽기 오류 ({file.name}): {e}. (터미널에 'pip install openpyxl'을 입력하세요)")
+                continue
+
+        # --- C. 데이터 정제 및 병합 ---
+        if df is not None:
+            try:
+                # 컬럼명 앞뒤 공백 제거
                 df.columns = [str(c).strip() for c in df.columns]
                 cols = df.columns.tolist()
                 
-                # 필요한 컬럼 찾기
-                col_cost = next((c for c in cols if any(x in c for x in ['비용', '소진', 'Cost', '금액'])), None)
-                col_cnt = next((c for c in cols if any(x in c for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
-                col_camp = next((c for c in cols if any(x in c for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
-                col_type = next((c for c in cols if any(x in c for x in ['구분', 'type'])), None)
+                # 필요한 컬럼 찾기 (유연하게 매칭)
+                col_cost = next((c for c in cols if any(x in str(c) for x in ['비용', '소진', 'Cost', '금액'])), None)
+                col_cnt = next((c for c in cols if any(x in str(c) for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
+                col_camp = next((c for c in cols if any(x in str(c) for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
+                col_type = next((c for c in cols if any(x in str(c) for x in ['구분', 'type'])), None)
 
                 if col_cost and col_cnt:
                     temp = pd.DataFrame()
-                    # 문자열로 된 숫자 처리 (예: "1,000" -> 1000)
-                    temp['cost'] = df[col_cost].astype(str).str.replace(',', '').str.replace('"', '').replace('', '0').astype(float).fillna(0)
-                    temp['count'] = df[col_cnt].astype(str).str.replace(',', '').str.replace('"', '').replace('', '0').astype(float).fillna(0)
                     
+                    # 숫자 데이터 클렌징 (콤마, 문자 제거)
+                    def clean_number(x):
+                        try:
+                            return float(str(x).replace(',', '').replace('"', '').replace(' ', ''))
+                        except:
+                            return 0
+
+                    temp['cost'] = df[col_cost].apply(clean_number).fillna(0)
+                    temp['count'] = df[col_cnt].apply(clean_number).fillna(0)
                     temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
+                    
                     if col_type: temp['type'] = df[col_type].fillna('')
                     else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
-                    combined_df = pd.concat([combined_df, temp], ignore_index=True)
-                else:
-                    pass # 필수 컬럼 없으면 스킵
                     
-        except Exception as e:
-            st.error(f"❌ 파일 처리 중 치명적 오류 ({file.name}): {e}")
+                    combined_df = pd.concat([combined_df, temp], ignore_index=True)
+            except Exception as e:
+                st.warning(f"데이터 변환 중 오류 ({file.name}): {e}")
 
     return combined_df
 
@@ -199,21 +216,20 @@ def run_v6_6_legacy():
         start_resource_10 = st.number_input("10시 시작 자원 (그래프용)", value=1100)
 
         st.header("3. 실시간 실적 입력")
-        current_total = st.number_input("현재 총 자원 (DA+제휴)", value=1963)
+        current_total = st.number_input("현재 총 자원", value=2000)
         current_bojang = st.number_input("ㄴ 보장분석", value=1600)
-        current_prod = st.number_input("ㄴ 상품자원", value=363)
-
-        st.header("4. 비용 입력 (14시 보고용)")
-        cost_da = st.number_input("DA 소진액", value=23560000)
+        current_prod = st.number_input("ㄴ 상품자원", value=400)
+        
+        cost_da = st.number_input("DA 소진액", value=23000000)
         cost_aff = st.number_input("제휴 소진액", value=11270000)
         cost_total = cost_da + cost_aff
 
-        st.header("5. 명일 예상 설정")
+        st.header("4. 명일 예상 설정")
         tom_member = st.number_input("명일 활동 인원", value=350)
         tom_sa_9 = st.number_input("명일 SA 9시 예상", value=410)
         tom_dawn_ad = st.checkbox("내일 새벽 고정광고 있음", value=False)
         
-        st.header("6. 금일 고정구좌 (중요)")
+        st.header("5. 금일 고정구좌 (중요)")
         fixed_ad_type = st.radio("발송 시간", ["없음", "12시 Only", "14시 Only", "12시+14시 Both"], index=2)
         fixed_content = st.text_input("내용", value="14시 KBPAY 발송 완료되었습니다")
 
@@ -259,7 +275,7 @@ def run_v6_6_legacy():
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
-    tom_total_target = tom_base_total + ad_boost
+    tom_total_target = tom_base_total + ad_boost 
     tom_da_req = tom_total_target - tom_sa_9
     tom_per_msg = 5.0 if tom_dawn_ad else 4.4
     ad_msg = "\n* 명일 새벽 고정광고(CPT/풀뷰) 집행 예정으로 자원 추가 확보 예상됩니다." if tom_dawn_ad else ""
@@ -357,11 +373,11 @@ def run_v6_6_legacy():
 
 
 # -----------------------------------------------------------
-# MODE 2: V15.1 (Advanced - Smart Parser)
+# MODE 2: V15.3 (Advanced - Ultra Smart Parser)
 # -----------------------------------------------------------
 def run_v15_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V15.1 Final)")
-    st.markdown("🚀 **스마트 파일 파서 & 요일별 보정 & 부스팅**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V15.3 Smart)")
+    st.markdown("🚀 **엑셀 오류 자동 회피 & CSV 집중 분석**")
 
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -694,10 +710,10 @@ def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
     version = st.sidebar.selectbox(
         "사용할 버전을 선택하세요:",
-        ["V15.1 (Final)", "V6.6 (Legacy)"]
+        ["V15.3 (Smart Parser)", "V6.6 (Legacy)"]
     )
     
-    if version == "V15.1 (Final)":
+    if version == "V15.3 (Smart Parser)":
         run_v15_0_advanced()
     else:
         run_v6_6_legacy()
