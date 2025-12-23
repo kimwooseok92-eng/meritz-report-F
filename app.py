@@ -5,7 +5,7 @@ import platform
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V14.1", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V14.2", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -60,7 +60,7 @@ def analyze_data(df, aff_to_bojang=False):
         'da_cnt': 0, 'da_cost': 0,
         'aff_cnt': 0,
         'media_stats': pd.DataFrame(),
-        'ratio_ba': 0.84 # 기본값 수정
+        'ratio_ba': 0.84 # 기본값
     }
     
     if df.empty: return res
@@ -183,9 +183,15 @@ def run_v6_6_legacy():
     last_spurt_prod = remaining_gap - last_spurt_ba
 
     fixed_msg = f"금일 {fixed_content}." if fixed_ad_type != "없음" else "금일 특이사항 없이 운영 중이며,"
-    msg_14 = "금일 고정구좌 이슈없이 집행중이며..." if est_18_from_14 >= da_target_18 else "오전 목표 대비 소폭 부족할 것으로..."
+    msg_14 = "금일 고정구좌 이슈없이 집행중이며, 전체 수량 또한 양사 합산 시 소폭 초과 달성할 것으로 보입니다." if est_18_from_14 >= da_target_18 else "오전 목표 대비 소폭 부족할 것으로 예상되나, 남은 시간 상품자원/보장분석 Push 운영하겠습니다."
     msg_16 = "* 보장분석 자원 넉넉할 것으로 보여 DA배너 일부 축소하여 비용 절감하겠습니다." if current_total + remaining_gap >= da_target_18 else "* 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."
     
+    base_multiplier = 3.15
+    tom_base_total = int(tom_member * base_multiplier)
+    ad_boost = 300 if tom_dawn_ad else 0
+    tom_total_target = tom_base_total + ad_boost
+    tom_da_req = tom_total_target - tom_sa_9
+    tom_per_msg = 5.0 if tom_dawn_ad else 4.4
     ad_msg = "\n* 명일 새벽 고정광고(CPT/풀뷰) 집행 예정으로 자원 추가 확보 예상됩니다." if tom_dawn_ad else ""
 
     # --- 탭 출력 ---
@@ -281,10 +287,10 @@ def run_v6_6_legacy():
 
 
 # -----------------------------------------------------------
-# MODE 2: V14.1 (Advanced - Fix & Upgrade)
+# MODE 2: V14.2 (Advanced - Detailed Table in Dashboard)
 # -----------------------------------------------------------
 def run_v14_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V14.1 Advanced)")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V14.2 Advanced)")
     st.markdown("🚀 **Time-Based Dynamic Forecasting (시점별 정밀 예측)**")
 
     with st.sidebar:
@@ -344,14 +350,12 @@ def run_v14_0_advanced():
             def_da_cost = real_data['da_cost']
         else:
             st.caption("파일 없음: 운영 전략 선택값 적용 (수기모드)")
-            # [FIX] 수기 모드 비율 현실화 (기존 0.16 -> 0.84 등)
             if op_mode_select == '상품증대': ratio_ba = 0.84
             elif op_mode_select == '효율화': ratio_ba = 0.88
             else: ratio_ba = 0.898
             def_da_cnt = 1500
             def_da_cost = 23000000
 
-        # [FIX] ratio_prod 정의 추가
         ratio_prod = 1 - ratio_ba
 
         st.markdown("##### 🅰️ DA (비제휴) 실적")
@@ -379,6 +383,7 @@ def run_v14_0_advanced():
         fixed_ad_type = st.radio("발송 시간", ["없음", "12시", "14시", "Both"], index=2)
         fixed_content = st.text_input("내용", value="14시 카카오페이 TMS 발송 예정입니다")
 
+    # --- 계산 로직 ---
     w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
     if fixed_ad_type != "없음" and day_option == '월': w = 0.90
     mul_14 = 1.215 if "12시" in fixed_ad_type else 1.35 * w
@@ -454,6 +459,7 @@ def run_v14_0_advanced():
         st.subheader(f"📊 실시간 DA 운영 현황")
         st.caption(f"ℹ️ {view_label}이 적용된 예상치입니다.")
         
+        # 09:30일 때는 계획표 우선
         if current_time_str == "09:30":
              st.info("📌 오전 09:30: 실시간 예측 대신 '목표 배분 계획'을 확인하세요.")
              hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
@@ -466,6 +472,17 @@ def run_v14_0_advanced():
                  acc_res.append(acc_res[-1] + round(gap * (w / total_w)))
              acc_res[-1] = da_target_18
              
+             # [NEW] 상세 분할 표 (Tab 0 전용)
+             acc_ba = [int(x * ratio_ba) for x in acc_res]
+             acc_prod = [x - b for x, b in zip(acc_res, acc_ba)]
+             
+             df_detail = pd.DataFrame({
+                 '누적 목표': [f"{x:,}" for x in acc_res],
+                 '보장 목표': [f"{x:,}" for x in acc_ba],
+                 '상품 목표': [f"{x:,}" for x in acc_prod]
+             }, index=hours)
+             
+             st.table(df_detail)
              st.line_chart(pd.DataFrame({'목표 흐름': acc_res}, index=hours))
         
         else:
@@ -482,15 +499,26 @@ def run_v14_0_advanced():
             if not dash_live.empty:
                 st.dataframe(dash_live.style.format("{:,}").background_gradient(cmap='Blues'), use_container_width=True)
             
+            # [NEW] 상세 분할 표 (예측 기준)
             hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
-            ba_start = int(start_resource_10 * 0.12)
+            ba_start = int(start_resource_10 * ratio_ba)
             prod_start = start_resource_10 - ba_start
             
             est_ba_live = int(est_final_live * ratio_ba)
             est_prod_live = est_final_live - est_ba_live
             
+            # 흐름 계산
             ba_flow = [int(ba_start + (est_ba_live - ba_start) * (i/8)) for i in range(9)]
             prod_flow = [int(prod_start + (est_prod_live - prod_start) * (i/8)) for i in range(9)]
+            total_flow = [b+p for b,p in zip(ba_flow, prod_flow)]
+            
+            st.markdown("##### 📉 시간대별 예상 진도 (상세)")
+            df_detail_live = pd.DataFrame({
+                 '예상 총합': [f"{x:,}" for x in total_flow],
+                 '예상 보장': [f"{x:,}" for x in ba_flow],
+                 '예상 상품': [f"{x:,}" for x in prod_flow]
+             }, index=hours)
+            st.table(df_detail_live)
             
             st.line_chart(pd.DataFrame({'보장분석': ba_flow, '상품자원': prod_flow}, index=hours))
 
@@ -588,10 +616,10 @@ def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
     version = st.sidebar.selectbox(
         "사용할 버전을 선택하세요:",
-        ["V14.1 (Advanced)", "V6.6 (Legacy)"]
+        ["V14.2 (Advanced)", "V6.6 (Legacy)"]
     )
     
-    if version == "V14.1 (Advanced)":
+    if version == "V14.2 (Advanced)":
         run_v14_0_advanced()
     else:
         run_v6_6_legacy()
