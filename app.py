@@ -11,7 +11,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V18.35", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V18.35 (Updated)", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -29,35 +29,35 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수
+# 1. 유틸리티 및 데이터 처리 함수 (신규 로직 반영)
 # -----------------------------------------------------------
-def clean_num(x):
-    """문자열 숫자를 실수형으로 변환 (쉼표 제거 강화)"""
+def clean_currency(x):
+    """쉼표 제거 및 숫자 변환 (Safe Float Conversion)"""
     if pd.isna(x) or x == '':
         return 0.0
-    try:
-        if isinstance(x, str):
+    if isinstance(x, str):
+        try:
             return float(x.replace(',', '').replace('"', '').replace("'", "").strip())
-        return float(x)
-    except:
-        return 0.0
+        except:
+            return 0.0
+    return float(x)
 
-def normalize_str(text):
-    """문자열 정규화 (맥/윈도우 자소 분리 방지)"""
-    if pd.isna(text): return ''
-    return unicodedata.normalize('NFC', str(text)).strip()
-
-def classify_type_by_name(text):
-    """캠페인명을 기준으로 보장/상품 분류"""
-    text = normalize_str(text).lower()
-    if '보장' in text or '누적' in text:
-        return '보장'
-    return '상품'
+def classify_product(campaign_name):
+    """상품 구분: 캠페인명에 '보장'/'누적' 포함 시 [보장분석], 그 외 [상품]"""
+    if pd.isna(campaign_name):
+        return '상품'
+    name = str(campaign_name)
+    if '보장' in name or '누적' in name:
+        return '보장분석'
+    else:
+        return '상품'
 
 def get_media_from_plab(row):
-    """피랩 매체 정밀 매핑 (DDN, GDN, 토스 등)"""
-    account = normalize_str(row.get('account', '')).upper()
-    gubun = normalize_str(row.get('구분', '')).upper()
+    """
+    피랩(PLab) 매체 식별 로직
+    """
+    account = str(row.get('account', '')).upper()
+    gubun = str(row.get('구분', '')).upper()
     
     # 1. 명시적 약어 매핑
     if 'DDN' in account: return '카카오'
@@ -68,176 +68,132 @@ def get_media_from_plab(row):
     media_map = {'NAVER': '네이버', 'KAKAO': '카카오', 'TOSS': '토스', 'GOOGLE': '구글'}
     
     for t in targets:
-        if t in account: return media_map.get(t, '기타')
+        if t in account: return media_map.get(t, t)
     for t in targets:
-        if t in gubun: return media_map.get(t, '기타')
+        if t in gubun: return media_map.get(t, t)
 
     return '기타'
 
-def read_file_safe(file, manual_encoding='Auto', **kwargs):
-    """인코딩 및 엑셀/CSV 자동 판별"""
-    file.seek(0)
-    filename = file.name.lower()
-
-    if filename.endswith(('.xlsx', '.xls')):
-        try: return pd.read_excel(file, engine='openpyxl', **kwargs)
-        except: return None
-
-    # CSV 인코딩 순회
-    if manual_encoding == 'UTF-8': encodings = ['utf-8']
-    elif manual_encoding == 'CP949 (한글 엑셀)': encodings = ['cp949', 'euc-kr']
-    else: encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-16', 'utf-8-sig']
-
-    for enc in encodings:
-        try:
-            file.seek(0)
-            if 'sep' in kwargs:
-                df = pd.read_csv(file, encoding=enc, on_bad_lines='skip', **kwargs)
-            else:
-                df = pd.read_csv(file, encoding=enc, on_bad_lines='skip')
-            return df
-        except: continue
-    return None
-
-def parse_files_by_rules(files, encoding_opt):
-    """매체별 파싱 및 '합계' 행 제거 로직"""
-    df_cost = pd.DataFrame() 
-    df_db = pd.DataFrame()   
+def process_marketing_data(uploaded_files):
+    """
+    업로드된 파일 리스트를 받아 파일명을 기준으로 파싱 후 통합 데이터 반환
+    """
+    dfs = []
     
-    for file in files:
-        fname = file.name
-        temp = pd.DataFrame()
-        df = None
+    for file in uploaded_files:
+        filename = file.name
+        file.seek(0) # 파일 포인터 초기화
         
         try:
-            # 1. 토스 (Header=3)
-            if "메리츠 화재_전략광고3팀_배너광고_캠페인" in fname:
-                df = read_file_safe(file, manual_encoding=encoding_opt, header=3)
-                if df is not None:
-                    # 합계 행 제거
-                    if '캠페인 명' in df.columns:
-                        df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
-                    
-                    col_cost = next((c for c in df.columns if '소진 비용' in str(c)), None)
-                    col_camp = next((c for c in df.columns if '캠페인 명' in str(c)), None)
-                    
-                    if col_cost and col_camp:
-                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 
-                        temp['campaign'] = df[col_camp].fillna('')
-                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                        temp['media'] = '토스'
-                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
+            # 1. 네이버 (result...)
+            if 'result' in filename:
+                df = pd.read_csv(file)
+                df['Cost'] = df['총 비용'].apply(clean_currency)
+                df['상품'] = df['캠페인 이름'].apply(classify_product)
+                df['매체'] = '네이버'
+                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
 
-            # 2. 카카오 (Tab)
-            elif "메리츠화재다이렉트_캠페인" in fname:
-                df = read_file_safe(file, manual_encoding=encoding_opt, sep='\t')
-                if df is not None:
-                    # 합계 행 제거 (카카오는 보통 없지만 안전장치)
-                    if '캠페인' in df.columns:
-                        df = df[~df['캠페인'].astype(str).str.contains('합계|Total', case=False, na=False)]
+            # 2. 카카오 (메리츠화재다이렉트...)
+            elif '메리츠화재다이렉트' in filename:
+                df = pd.read_csv(file, sep='\t')
+                df['Cost'] = df['비용'].apply(clean_currency) * 1.1
+                df['상품'] = df['캠페인'].apply(classify_product)
+                df['매체'] = '카카오'
+                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
 
-                    col_cost = '비용' if '비용' in df.columns else None
-                    col_camp = '캠페인' if '캠페인' in df.columns else None
-                    if col_cost and col_camp:
-                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 
-                        temp['campaign'] = df[col_camp].fillna('')
-                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                        temp['media'] = '카카오'
-                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
+            # 3. 토스 (메리츠 화재... 통합 성과보고서)
+            elif '메리츠 화재' in filename and '통합' in filename:
+                df = pd.read_csv(file, header=3)
+                # 합계 행 제거
+                if '캠페인 명' in df.columns:
+                     df = df[~df['캠페인 명'].astype(str).str.contains('합계|Total', case=False, na=False)]
+                
+                df['Cost'] = df['소진 비용'].apply(clean_currency) * 1.1
+                df['상품'] = df['캠페인 명'].apply(classify_product)
+                df['매체'] = '토스'
+                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
 
-            # 3. 네이버
-            elif "result" in fname:
-                df = read_file_safe(file, manual_encoding=encoding_opt)
-                if df is not None:
-                    col_cost = next((c for c in df.columns if '총 비용' in str(c)), None)
-                    col_camp = next((c for c in df.columns if '캠페인 이름' in str(c)), None)
-                    if col_cost and col_camp:
-                        temp['cost'] = df[col_cost].apply(clean_num)
-                        temp['campaign'] = df[col_camp].fillna('')
-                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                        temp['media'] = '네이버'
-                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
+            # 4. 구글 (캠페인 보고서...)
+            elif '캠페인 보고서' in filename:
+                df = pd.read_csv(file, sep='\t', header=2)
+                df.columns = df.columns.str.strip()
+                # 합계 행 제거
+                if '캠페인' in df.columns:
+                    df = df[~df['캠페인'].astype(str).str.contains('합계|Total|--', case=False, na=False)]
+                    df = df[df['캠페인'].notna()]
 
-            # 4. 구글 (Tab, Header=2)
-            elif "캠페인 보고서" in fname:
-                df = read_file_safe(file, manual_encoding=encoding_opt, sep='\t', header=2)
-                if df is not None:
-                    df.columns = df.columns.str.strip()
-                    # [중요] 구글 보고서의 '합계' 또는 'Total' 행 제거
-                    if '캠페인' in df.columns:
-                        df = df[~df['캠페인'].astype(str).str.contains('합계|Total|--', case=False, na=False)]
-                        # 캠페인 명이 비어있는 행도 제거
-                        df = df[df['캠페인'].notna()]
+                cost_val = df['비용'].apply(clean_currency) if '비용' in df.columns else 0
+                df['Cost'] = cost_val * 1.1 * 1.15
+                df['상품'] = df['캠페인'].apply(classify_product)
+                df['매체'] = '구글'
+                dfs.append(df.groupby(['매체', '상품'])['Cost'].sum().reset_index())
 
-                    col_cost = '비용' if '비용' in df.columns else None
-                    col_camp = '캠페인' if '캠페인' in df.columns else None
-                    if col_cost and col_camp:
-                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 * 1.15
-                        temp['campaign'] = df[col_camp].fillna('')
-                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                        temp['media'] = '구글'
-                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
+            # 5. 피랩 (Performance Lab...)
+            elif 'Performance Lab' in filename:
+                df = pd.read_csv(file)
+                # DB 계산: 전송 - 실패 - 재인입
+                db_cnt = (df['METIS전송'].apply(clean_currency) - 
+                          df['METIS실패건수'].apply(clean_currency) - 
+                          df['METIS재인입건수'].apply(clean_currency))
+                
+                df['보장'] = db_cnt
+                df['매체'] = df.apply(get_media_from_plab, axis=1)
+                df['상품'] = df['구분'].apply(classify_product)
+                
+                # 피랩 데이터는 Cost가 0이고 보장(DB)만 있음
+                plab_summary = df.groupby(['매체', '상품'])['보장'].sum().reset_index()
+                plab_summary['Cost'] = 0
+                dfs.append(plab_summary)
 
-            # 5. 피랩 (DB)
-            elif "Performance Lab" in fname:
-                df = read_file_safe(file, manual_encoding=encoding_opt)
-                if df is not None:
-                    col_send = next((c for c in df.columns if 'METIS전송' in str(c) and '율' not in str(c)), None)
-                    col_fail = next((c for c in df.columns if 'METIS실패건수' in str(c)), None)
-                    col_re = next((c for c in df.columns if 'METIS재인입건수' in str(c)), None)
-                    
-                    if col_send:
-                        s = df[col_send].apply(clean_num).fillna(0)
-                        f = df[col_fail].apply(clean_num).fillna(0) if col_fail else 0
-                        r = df[col_re].apply(clean_num).fillna(0) if col_re else 0
-                        
-                        temp['count'] = s - f - r
-                        temp['campaign'] = df['구분'].fillna('')
-                        temp['account'] = df['account'].fillna('')
-                        temp['구분'] = df['구분'].fillna('')
-                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                        temp['media'] = temp.apply(get_media_from_plab, axis=1)
-                        df_db = pd.concat([df_db, temp], ignore_index=True)
-                    
         except Exception as e:
-            st.error(f"❌ 파일 처리 중 오류 발생: {fname} / {e}")
+            st.error(f"❌ 파일 처리 중 오류 발생 ({filename}): {e}")
             continue
 
-    return df_cost, df_db
+    if not dfs:
+        return None
 
-def aggregate_data_v2(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt):
-    """데이터 집계 및 수기 보정"""
+    # 데이터 통합
+    all_data = pd.concat(dfs, ignore_index=True)
+    final_df = all_data.groupby(['매체', '상품']).sum().reset_index()
+    
+    # CPA 계산
+    final_df['CPA'] = final_df.apply(lambda x: x['Cost'] / x['보장'] if x['보장'] > 0 else 0, axis=1)
+    
+    return final_df
+
+def convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, manual_da_cost):
+    """
+    통합된 final_df를 대시보드용 stats 포맷으로 변환
+    """
     media_list = ['네이버', '카카오', '토스', '구글', '제휴', '기타']
     stats = pd.DataFrame(index=media_list, columns=['Bojang_Cnt', 'Prod_Cnt', 'Cost', 'CPA']).fillna(0)
     
-    # 1. 비용 집계
-    if not df_cost.empty:
-        cost_grp = df_cost.groupby('media')['cost'].sum()
-        for m, val in cost_grp.items():
-            if m in stats.index: stats.loc[m, 'Cost'] += val
-            else: 
-                if '기타' not in stats.index: stats.loc['기타'] = [0,0,0,0]
-                stats.loc['기타', 'Cost'] += val
-
-    # 2. DB 집계
-    if not df_db.empty:
-        cnt_grp = df_db.groupby(['media', 'type'])['count'].sum()
-        for (m, t), val in cnt_grp.items():
-            target_media = m if m in stats.index else '기타'
-            if t == '보장': stats.loc[target_media, 'Bojang_Cnt'] += val
-            else: stats.loc[target_media, 'Prod_Cnt'] += val
-
-    # 3. 수기 보정
+    if final_df is not None:
+        for _, row in final_df.iterrows():
+            m = row['매체']
+            if m not in stats.index: m = '기타'
+            
+            # Cost 합산
+            stats.loc[m, 'Cost'] += row['Cost']
+            
+            # DB Count 합산 ('보장' 컬럼에 건수가 들어있음)
+            if row['상품'] == '보장분석':
+                stats.loc[m, 'Bojang_Cnt'] += row['보장']
+            else:
+                stats.loc[m, 'Prod_Cnt'] += row['보장']
+    
+    # 수기 보정 (DA)
     if manual_da_cnt > 0 or manual_da_cost > 0:
         stats.loc['기타', 'Prod_Cnt'] += manual_da_cnt
         stats.loc['기타', 'Cost'] += manual_da_cost
 
+    # 수기 보정 (제휴)
     if manual_aff_cnt > 0 or manual_aff_cost > 0:
         stats.loc['제휴', :] = 0
         stats.loc['제휴', 'Bojang_Cnt'] = manual_aff_cnt
         stats.loc['제휴', 'Cost'] = manual_aff_cost
 
-    # 4. 최종 계산
+    # 최종 계산
     stats['Total_Cnt'] = stats['Bojang_Cnt'] + stats['Prod_Cnt']
     stats['CPA'] = stats.apply(lambda x: x['Cost'] / x['Total_Cnt'] if x['Total_Cnt'] > 0 else 0, axis=1)
     
@@ -263,24 +219,21 @@ def aggregate_data_v2(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da
 # MODE 2: V18.35 Master
 # -----------------------------------------------------------
 def run_v18_35_master():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35)")
-    st.markdown("🚀 **합계행 자동제거 & UI 개선 완료**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V18.35 Updated)")
+    st.markdown("🚀 **자동 파일 인식 & 로직 검증 완료**")
 
     # 변수 초기화
     current_bojang, current_prod = 0, 0
     
     with st.sidebar:
-        st.header("1. 파일 설정")
-        encoding_opt = st.radio("📄 CSV 인코딩", ['Auto', 'CP949 (한글 엑셀)', 'UTF-8'], index=0)
-        
-        st.header("2. 기본 설정")
+        st.header("1. 기본 설정")
         current_time_str = st.select_slider("⏱️ 현재 기준", options=["09:30", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"], value="14:00")
         is_boosting = False
         if current_time_str in ["16:00", "17:00"]:
             is_boosting = st.checkbox("🔥 긴급 부스팅", value=False)
         day_option = st.selectbox("요일", ['월', '화', '수', '목', '금'], index=0)
         
-        st.header("3. 목표 수립")
+        st.header("2. 목표 수립")
         active_member = st.number_input("활동 인원", value=359)
         c1, c2 = st.columns(2)
         with c1: target_bojang = st.number_input("보장 목표", value=500)
@@ -300,14 +253,15 @@ def run_v18_35_master():
             da_target_17 = int(da_target_18 * 0.96)
             da_per_17 = round(da_target_17 / active_member, 1)
 
-        st.header("4. [자동] 10시 자원")
+        st.header("3. [자동] 10시 자원")
         with st.expander("📂 업로드"):
             st.file_uploader("어제 24시", key="f1")
             st.file_uploader("오늘 10시", key="f3")
         start_resource_10 = st.number_input("10시 자원", value=1100)
 
-        st.header("5. [실시간] 분석")
-        uploaded_realtime = st.file_uploader("실시간 파일 (다중 선택)", accept_multiple_files=True)
+        st.header("4. [실시간] 분석")
+        # 파일 업로더 변경: 파일명 기반 자동 인식
+        uploaded_realtime = st.file_uploader("실시간 파일 (파일명 자동 인식)", accept_multiple_files=True)
         
         st.markdown("**✏️ 수기 입력 (제휴)**")
         col_m1, col_m2 = st.columns(2)
@@ -320,8 +274,9 @@ def run_v18_35_master():
             manual_aff_cnt = int(manual_aff_cost / manual_aff_cpa) if manual_aff_cpa > 0 else 0
             st.caption(f"제휴 환산: {manual_aff_cnt:,}건")
 
-        df_cost, df_db = parse_files_by_rules(uploaded_realtime, encoding_opt) if uploaded_realtime else (pd.DataFrame(), pd.DataFrame())
-        res = aggregate_data_v2(df_cost, df_db, manual_aff_cost, manual_aff_cnt, manual_da_cost, manual_da_cnt)
+        # --- 데이터 처리 로직 호출 ---
+        final_df = process_marketing_data(uploaded_realtime) if uploaded_realtime else None
+        res = convert_to_stats(final_df, manual_aff_cnt, manual_aff_cost, manual_da_cnt, manual_da_cost)
         
         current_total = res['total_cnt']
         cost_total = res['total_cost']
@@ -329,7 +284,7 @@ def run_v18_35_master():
         current_bojang = res['bojang_cnt']
         current_prod = res['prod_cnt']
 
-        st.header("6. 보고 설정")
+        st.header("5. 보고 설정")
         tom_member = st.number_input("명일 인원", value=350)
         tom_dawn_ad = st.checkbox("새벽 광고", value=False)
         fixed_ad_type = st.radio("발송 시간", ["없음", "12시", "14시", "Both"], index=2)
@@ -369,8 +324,8 @@ def run_v18_35_master():
     current_mul = time_multipliers.get(current_time_str, 1.35)
     est_final_live = int(current_total * current_mul)
 
-    # --- 탭 출력 ---
-    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근", "🔍 검증"])
+    # --- 탭 출력 (검증 탭 삭제됨) ---
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근"])
 
     with tab0:
         st.subheader(f"📊 실시간 DA 현황 대시보드 ({current_time_str})")
@@ -453,7 +408,6 @@ def run_v18_35_master():
 
     with tab1:
         st.subheader("📋 오전 목표 수립")
-        # (기존 코드 유지)
         st.line_chart(pd.DataFrame({'목표 흐름': acc_res}, index=hours))
         report_morning = f"""금일 DA+제휴파트 예상마감 공유드립니다.
 
@@ -516,11 +470,6 @@ def run_v18_35_master():
 
 * 영업가족 {tom_member}명 기준 인당 {4.4 if not tom_dawn_ad else 5.0}건 이상 확보할 수 있도록 운영 예정입니다."""
         st.text_area("복사 텍스트 (퇴근):", report_tomorrow, height=250)
-
-    with tab5:
-        st.subheader("🔍 데이터 검증")
-        if not df_db.empty:
-            st.dataframe(df_db[['account', 'media', 'campaign', 'count']].head(50), use_container_width=True)
 
 # -----------------------------------------------------------
 # MAIN
