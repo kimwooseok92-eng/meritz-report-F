@@ -10,7 +10,7 @@ warnings.simplefilter("ignore")
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V16.2", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V16.3", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -28,22 +28,21 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (Blacklist Parser)
+# 1. 유틸리티 함수 (Parser with Strong Blacklist)
 # -----------------------------------------------------------
 def parse_uploaded_files(files):
     data_frames = []
     
-    # 인식 대상 컬럼명
+    # [인식 대상 컬럼]
     target_cols = ['비용', '소진', 'Cost', '금액', '총 비용', '캠페인', 'Campaign', '광고명', '매체']
     
-    # 건수로 인식할 키워드 (우선순위 순)
+    # [건수 키워드] (우선순위 순)
     count_cols_keywords = ['보장분석', '잠재고객', '전환', 'DB', '결과', '계', '합계', '수량', '건수']
 
     for file in files:
         df = None
         fname = file.name.lower()
-        # 피랩 파일 식별 (파일명에 performance 또는 lab 포함)
-        is_plab = 'performance' in fname or 'lab' in fname
+        is_plab = 'performance' in fname or 'lab' in fname 
         
         try:
             # --- A. CSV / TXT Parsing ---
@@ -76,9 +75,6 @@ def try_read_csv(file, targets, count_keys):
     encodings = ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
     separators = [',', '\t']
     
-    # 헤더 찾기용 확장 타겟
-    extended_targets = targets + count_keys
-
     for enc in encodings:
         for sep in separators:
             try:
@@ -122,18 +118,18 @@ def refine_df(df, cost_keys, cnt_keys):
     # 1. 비용 컬럼 찾기
     col_cost = next((c for c in cols if any(x in str(c) for x in cost_keys)), None)
     
-    # 2. 건수 컬럼 찾기 (Blacklist 적용)
-    # 노출, 도달, 클릭, CPM, CPC 등이 포함된 컬럼은 절대 건수로 잡지 않음
-    blacklist = ['노출', '도달', '클릭', 'CPM', 'CPC', 'CTR', '비용', '단가']
+    # 2. 건수 컬럼 찾기 (Blacklist 적용 - 여기가 핵심!)
+    # 이 단어들이 포함된 컬럼은 절대 건수로 잡지 않음
+    blacklist = ['노출', '도달', '클릭', 'CPM', 'CPC', 'CTR', '비용', '단가', '율', 'Rate']
     
     col_cnt = None
     for key in cnt_keys:
         # 해당 키워드가 포함된 컬럼 중 블랙리스트 단어가 없는 것 찾기
         candidates = [c for c in cols if key in str(c) and not any(b in str(c) for b in blacklist)]
         
-        # '결과' 컬럼의 경우 '결과 유형'이나 '결과당 비용' 등은 제외해야 함
+        # '결과' 컬럼의 경우 '결과 유형'이나 '결과당 비용' 등은 제외
         if key == '결과':
-             candidates = [c for c in candidates if str(c).strip() == '결과'] # 정확히 '결과'만
+             candidates = [c for c in candidates if str(c).strip() == '결과']
 
         if candidates:
             col_cnt = candidates[0]
@@ -243,10 +239,10 @@ def run_v6_6_legacy():
     # (Legacy 코드는 이전과 동일)
 
 # -----------------------------------------------------------
-# MODE 2: V16.2 Advanced
+# MODE 2: V16.3 Advanced
 # -----------------------------------------------------------
 def run_v16_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V16.2 Stable)")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V16.3 Fixed)")
     st.markdown("🚀 **파서 정밀도 향상 & 에러 방지 & 중복 방지**")
 
     # [핵심] 변수 초기화 (NameError 방지)
@@ -254,6 +250,8 @@ def run_v16_0_advanced():
     current_prod = 0
     est_ba_18_14 = 0
     est_prod_18_14 = 0
+    da_target_bojang = 0
+    da_target_prod = 0
     
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -332,7 +330,9 @@ def run_v16_0_advanced():
     mul_14 = base_mul_14
     mul_16 = 1.25 if is_boosting else 1.10
 
-    da_target_18 = (target_bojang - sa_est_bojang) + (target_product - sa_est_prod + da_add_target)
+    da_target_bojang = target_bojang - sa_est_bojang
+    da_target_prod = target_product - sa_est_prod + da_add_target
+    da_target_18 = da_target_bojang + da_target_prod
     da_per_18 = round(da_target_18 / active_member, 1) if active_member else 0
 
     est_18_from_14 = int(current_total * mul_14)
@@ -412,8 +412,8 @@ def run_v16_0_advanced():
 
 def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
-    version = st.sidebar.selectbox("버전 선택", ["V16.2 (Stable)", "V6.6 (Legacy)"])
-    if version == "V16.2 (Stable)": run_v16_0_advanced()
+    version = st.sidebar.selectbox("버전 선택", ["V16.3 (Emergency Fix)", "V6.6 (Legacy)"])
+    if version == "V16.3 (Emergency Fix)": run_v16_0_advanced()
     else: run_v6_6_legacy()
 
 if __name__ == "__main__":
