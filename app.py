@@ -7,33 +7,27 @@ import matplotlib.font_manager as fm
 import platform
 
 # -----------------------------------------------------------
-# 1. 폰트 설정 (강화된 버전)
+# 1. 폰트 설정
 # -----------------------------------------------------------
 @st.cache_resource
 def set_korean_font():
-    # OS별 폰트 설정
     system_name = platform.system()
-    
     if system_name == 'Windows':
         font_path = "C:/Windows/Fonts/malgun.ttf"
         font_name = "Malgun Gothic"
-    elif system_name == 'Darwin': # Mac
+    elif system_name == 'Darwin':
         font_path = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
         font_name = "AppleGothic"
-    else: # Linux (Streamlit Cloud 등)
-        # 나눔고딕이 설치되어 있다고 가정
+    else:
         font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
         font_name = "NanumGothic"
     
-    # 폰트가 실제로 존재하는지 확인 후 설정
     if os.path.exists(font_path):
         font_prop = fm.FontProperties(fname=font_path)
         plt.rc('font', family=font_prop.get_name())
     else:
-        # 폰트 파일이 없으면 OS 기본 한글 폰트 시도
         plt.rc('font', family=font_name)
-    
-    plt.rcParams['axes.unicode_minus'] = False # 마이너스 기호 깨짐 방지
+    plt.rcParams['axes.unicode_minus'] = False
 
 set_korean_font()
 
@@ -45,15 +39,12 @@ def parse_uploaded_files(files):
     for file in files:
         try:
             if file.name.endswith('.csv'):
-                try:
-                    df = pd.read_csv(file, encoding='utf-8-sig')
-                except:
-                    df = pd.read_csv(file, encoding='cp949')
+                try: df = pd.read_csv(file, encoding='utf-8-sig')
+                except: df = pd.read_csv(file, encoding='cp949')
             else:
                 df = pd.read_excel(file)
             
             cols = df.columns.tolist()
-            # 컬럼 매핑 (유연하게)
             col_cost = next((c for c in cols if any(x in c for x in ['비용', '소진', 'Cost', '금액'])), None)
             col_cnt = next((c for c in cols if any(x in c for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
             col_camp = next((c for c in cols if any(x in c for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
@@ -65,15 +56,12 @@ def parse_uploaded_files(files):
                 temp['count'] = df[col_cnt].fillna(0)
                 temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
                 
-                if col_type:
-                    temp['type'] = df[col_type].fillna('')
-                else:
-                    temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
+                if col_type: temp['type'] = df[col_type].fillna('')
+                else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
                 
                 combined_df = pd.concat([combined_df, temp], ignore_index=True)
         except Exception as e:
             st.error(f"파일 읽기 오류 ({file.name}): {e}")
-            
     return combined_df
 
 def analyze_data(df):
@@ -87,7 +75,6 @@ def analyze_data(df):
     
     if df.empty: return res
 
-    # 집계
     res['total_cnt'] = int(df['count'].sum())
     res['total_cost'] = int(df['cost'].sum())
 
@@ -101,7 +88,7 @@ def analyze_data(df):
     mask_aff = df['campaign'].astype(str).str.contains('제휴')
     res['da_cost_only'] = int(df[~mask_aff]['cost'].sum())
 
-    # 대시보드 데이터 생성
+    # 대시보드용 데이터 생성
     def normalize_media(name):
         name = str(name).lower()
         if '네이버' in name or 'naver' in name or 'nasp' in name: return '네이버'
@@ -112,22 +99,27 @@ def analyze_data(df):
     
     df['media_group'] = df['campaign'].apply(normalize_media)
     
-    # 피벗 테이블 생성
+    # 1. 현재 실적 피벗
     pivot_cnt = df.pivot_table(index='media_group', columns='type', values='count', aggfunc='sum', fill_value=0)
     pivot_cost = df.pivot_table(index='media_group', columns='type', values='cost', aggfunc='sum', fill_value=0)
     
-    pivot_cnt.columns = [f"{c}_건수" for c in pivot_cnt.columns]
-    pivot_cost.columns = [f"{c}_비용" for c in pivot_cost.columns]
+    pivot_cnt.columns = [f"현재_{c}" for c in pivot_cnt.columns] # 예: 현재_보장, 현재_상품
     
-    res['media_stats'] = pd.concat([pivot_cnt, pivot_cost], axis=1).fillna(0).astype(int)
+    # 비용은 합계로 표시
+    media_cost = df.pivot_table(index='media_group', values='cost', aggfunc='sum', fill_value=0)
+    media_cost.columns = ['현재_비용']
+
+    # 2. 데이터프레임 병합
+    stats = pd.concat([pivot_cnt, media_cost], axis=1).fillna(0).astype(int)
+    res['media_stats'] = stats
             
     return res
 
 # -----------------------------------------------------------
 # 3. 웹사이트 UI & 사이드바
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V6.3", layout="wide")
-st.title("📊 메리츠화재 DA 보고 자동화 (V6.3)")
+st.set_page_config(page_title="메리츠 보고 자동화 V6.4", layout="wide")
+st.title("📊 메리츠화재 DA 보고 자동화 (V6.4)")
 
 with st.sidebar:
     st.header("1. 기본 설정")
@@ -136,7 +128,7 @@ with st.sidebar:
                            ['평시 (8.5~9.0건)', '이슈/보수적 (6.0~7.2건)', '월말/공격적 (9.5건↑)'],
                            index=1 if day_option=='월' else 0)
     
-    st.markdown("""<small>💡 <b>운영 전략:</b> 파일 업로드 시 실제 비율 적용, 수기 시 선택값 적용</small>""", unsafe_allow_html=True)
+    st.markdown("""<small>💡 <b>운영 전략:</b> 파일 업로드 시 실제 비율 적용</small>""", unsafe_allow_html=True)
     op_mode = st.selectbox("운영 전략", ['일반', '상품증대', '효율화'])
 
     st.markdown("---")
@@ -152,7 +144,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("3. [자동] 10시 시작 자원")
-    with st.expander("📂 파일 업로드 (어제+오늘)"):
+    with st.expander("📂 파일 업로드"):
         file_yest_24 = st.file_uploader("어제 24시 마감 파일", key="f1")
         file_today_10 = st.file_uploader("오늘 10시 현재 파일", key="f2")
         reported_yest_18 = st.number_input("어제 18시 보고된 총량", value=3000)
@@ -205,35 +197,51 @@ with st.sidebar:
 # 4. 핵심 로직
 # -----------------------------------------------------------
 def generate_report():
-    if uploaded_realtime and real_data['total_cnt'] > 0:
-        ratio_ba = real_data['ratio_ba']
-    else:
-        if op_mode == '상품증대': ratio_ba = 0.16 
-        elif op_mode == '효율화': ratio_ba = 0.12
-        else: ratio_ba = 0.102
-    ratio_prod = 1 - ratio_ba
-    
+    # A. Multiplier 계산
     w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
     if fixed_ad_type != "없음": 
         if day_option == '월': w = 0.90 
         else: w = max(w, 1.0)
 
+    if "12시" in fixed_ad_type: forecast_multiplier = 1.215 
+    else: forecast_multiplier = 1.35 * w 
+
+    # B. 전체 목표
     da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
     da_per_18 = round(da_target_18 / active_member, 1)
     
     gap_percent = 0.040 if fixed_ad_type == "없음" else 0.032
     da_target_17 = da_target_18 - round(da_target_18 * gap_percent)
     da_per_17 = round(da_target_17 / active_member, 1)
-
-    if "12시" in fixed_ad_type: forecast_multiplier = 1.215 
-    else: forecast_multiplier = 1.35 * w 
     
+    # C. 전체 예측
     est_18_from_14 = int(current_total * forecast_multiplier)
+    # Range 보정
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
-    
-    est_cost_24 = int(cost_total * 1.8)
 
+    # D. 비율 결정
+    if uploaded_realtime and real_data['total_cnt'] > 0:
+        ratio_ba = real_data['ratio_ba']
+    else:
+        if op_mode == '상품증대': ratio_ba = 0.16 
+        elif op_mode == '효율화': ratio_ba = 0.12
+        else: ratio_ba = 0.102
+
+    # E. 매체별 예측 (대시보드용) - V6.4 추가 로직
+    # 현재 실적에 forecast_multiplier를 곱해서 예상 컬럼 생성
+    media_dashboard = real_data['media_stats'].copy()
+    if not media_dashboard.empty:
+        # 각 수량 컬럼에 예측 배수 적용
+        for col in media_dashboard.columns:
+            if '건수' in col:
+                media_dashboard[col.replace('현재', '예상')] = (media_dashboard[col] * forecast_multiplier).astype(int)
+        
+        # 컬럼 순서 재정렬 (현재_보장, 예상_보장, 현재_상품, 예상_상품...)
+        cols = sorted(media_dashboard.columns.tolist())
+        media_dashboard = media_dashboard[cols]
+
+    # F. 16시 예측
     est_18_from_16 = int(current_total / 0.91)
     remaining_gap = est_18_from_16 - current_total
     if remaining_gap < 150: remaining_gap = 150
@@ -242,6 +250,7 @@ def generate_report():
     last_spurt_ba = int(remaining_gap * 0.9) 
     last_spurt_prod = remaining_gap - last_spurt_ba
 
+    # G. 멘트 및 CPA
     fixed_msg = f"금일 {fixed_content}." if fixed_ad_type != "없음" else "금일 특이사항 없이 운영 중이며,"
     
     if est_18_from_14 >= da_target_18:
@@ -258,6 +267,7 @@ def generate_report():
     cpa_aff = round(cost_aff / current_prod / 10000, 1) if current_prod else 0
     cpa_total = round(cost_total / current_total / 10000, 1) if current_total else 0
 
+    # H. 명일 예측
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
@@ -267,19 +277,20 @@ def generate_report():
 
     return {
         'da_17': da_target_17, 'per_17': da_per_17,
-        'ba_17': round(da_target_17 * ratio_ba), 'prod_17': round(da_target_17 * ratio_prod),
+        'ba_17': round(da_target_17 * ratio_ba), 'prod_17': round(da_target_17 * (1-ratio_ba)),
         'da_18': da_target_18, 'per_18': da_per_18,
-        'ba_18': round(da_target_18 * ratio_ba), 'prod_18': round(da_target_18 * ratio_prod),
+        'ba_18': round(da_target_18 * ratio_ba), 'prod_18': round(da_target_18 * (1-ratio_ba)),
         'est_18_14': est_18_from_14, 
         'est_per_18_14': round(est_18_from_14/active_member, 1),
         'est_ba_18_14': round(est_18_from_14 * ratio_ba), 
-        'est_prod_18_14': round(est_18_from_14 * ratio_prod),
+        'est_prod_18_14': round(est_18_from_14 * (1-ratio_ba)),
         'msg_14': msg_14, 'cpa_da': cpa_da, 'cpa_aff': cpa_aff, 'cpa_total': cpa_total,
         'est_18_16': current_total + remaining_gap,
         'remaining_total': remaining_gap, 'remaining_ba': last_spurt_ba, 'remaining_prod': last_spurt_prod, 'msg_16': msg_16,
         'fixed_msg': fixed_msg,
         'tom_total': tom_total_target, 'tom_da': tom_da_req, 'tom_per_msg': tom_per_msg,
-        'tom_ba': round(tom_da_req * ratio_ba), 'tom_prod': round(tom_da_req * (1-ratio_ba))
+        'tom_ba': round(tom_da_req * ratio_ba), 'tom_prod': round(tom_da_req * (1-ratio_ba)),
+        'dashboard': media_dashboard
     }
 
 res = generate_report()
@@ -305,10 +316,8 @@ with tab1:
 ㄴ 상품 : {res['prod_18']}건
 
 * {res['fixed_msg']}{issue_text}"""
-    
     st.text_area("복사 텍스트:", report_morning, height=300)
     
-    # 시간대별 그래프 (폰트 적용)
     hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
     weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09] 
     if fixed_ad_type == "14시 Only": weights = [0, 0.11, 0.11, 0.11, 0.11, 0.28, 0.10, 0.10, 0.08]
@@ -337,20 +346,21 @@ with tab1:
     ax.grid(True, linestyle='--', alpha=0.5)
     st.pyplot(fig)
 
-
 with tab2:
     st.subheader("🔥 14:00 중간 보고 & 대시보드")
     
-    # [NEW] 대시보드 표시 로직 수정: 데이터가 있으면 무조건 표시
-    if not real_data['media_stats'].empty:
-        st.markdown("#### 📊 매체별 상세 현황 (Live Dashboard)")
-        st.dataframe(real_data['media_stats'].style.background_gradient(cmap='Reds', subset=['보장_건수', '상품_건수']), use_container_width=True)
-        st.info("💡 파일 데이터 기반으로 분석된 결과입니다.")
+    # [NEW] 대시보드 (매체별 예상 마감 포함)
+    if not res['dashboard'].empty:
+        st.markdown("#### 📊 매체별 예상 성과 (Live Dashboard)")
+        # 컬러 강조: 예상 수치 컬럼에 하이라이트
+        highlight_cols = [c for c in res['dashboard'].columns if '예상' in c]
+        st.dataframe(res['dashboard'].style.background_gradient(cmap='Blues', subset=highlight_cols).format("{:,}"), use_container_width=True)
     elif uploaded_realtime:
-        st.error("⚠️ 파일을 업로드했으나 데이터를 읽지 못했습니다. 컬럼명(매체, 비용, 수량)을 확인해주세요.")
+        st.error("⚠️ 데이터를 읽지 못했습니다. 컬럼명을 확인해주세요.")
     else:
-        st.info("📂 로우데이터(Excel/CSV)를 업로드하면 매체별 상세 현황이 이곳에 표시됩니다.")
+        st.info("📂 로우데이터 업로드 시 매체별 상세 예측이 표시됩니다.")
 
+    est_cost_24 = int(cost_total * 1.8)
     report_1400 = f"""DA파트 금일 14시간 현황 전달드립니다.
 
 금일 목표(18시 기준) : 인당배분 {res['per_18']}건 / 총 {res['da_18']}건
@@ -371,15 +381,15 @@ with tab2:
 - 제휴: {int(cost_aff * 1.25)//10000}만원 / 가망CPA {max(2.4, res['cpa_aff']-0.2)}만원
 
 [예상 마감 - 24시 기준]
-- 총합(DA/제휴): {int(cost_total * 1.8)//10000}만원 / 가망CPA {max(2.9, res['cpa_total']-0.4)}만원"""
+- 총합(DA/제휴): {est_cost_24//10000}만원 / 가망CPA {max(2.9, res['cpa_total']-0.4)}만원"""
     st.text_area("복사 텍스트 (14시):", report_1400, height=450)
 
 with tab3:
     st.subheader("⚠️ 16:00 마감 임박 보고")
     
-    if not real_data['media_stats'].empty:
+    if not res['dashboard'].empty:
         st.markdown("#### 📊 매체별 운영 현황")
-        st.dataframe(real_data['media_stats'], use_container_width=True)
+        st.dataframe(res['dashboard'].format("{:,}"), use_container_width=True)
 
     report_1600 = f"""DA파트 금일 16시간 현황 전달드립니다.
 
