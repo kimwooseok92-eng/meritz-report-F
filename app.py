@@ -9,7 +9,7 @@ import platform
 # -----------------------------------------------------------
 # 0. 공통 설정 & 폰트
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V10.0", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V10.1", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -57,10 +57,8 @@ def parse_uploaded_files(files):
                 temp['cost'] = df[col_cost].fillna(0)
                 temp['count'] = df[col_cnt].fillna(0)
                 temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
-                
                 if col_type: temp['type'] = df[col_type].fillna('')
                 else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
-                
                 combined_df = pd.concat([combined_df, temp], ignore_index=True)
         except Exception as e:
             st.error(f"파일 읽기 오류 ({file.name}): {e}")
@@ -122,86 +120,58 @@ def analyze_data(df, aff_to_bojang=False):
 
 
 # -----------------------------------------------------------
-# MODE 1: V6.6 Legacy (UI 완벽 복원)
+# MODE 1: V6.6 Legacy (UI 완벽 복원 + 버그 수정)
 # -----------------------------------------------------------
 def run_v6_6_legacy():
     st.title("📊 메리츠화재 DA 보고 자동화 (V6.6 Legacy)")
-    st.info("ℹ️ SA 분리/제휴 역산 기능이 적용되지 않은 **기존 안정화 버전**입니다.")
+    st.info("ℹ️ 기존 로직 기반의 수기 입력 모드입니다.")
 
     with st.sidebar:
         st.header("1. 기본 설정")
-        report_view_option = st.radio("⏱️ 보고 시점", ["14시 (중간)", "16시 (마감)"], index=0)
         day_option = st.selectbox("오늘 요일", ['월', '화', '수', '목', '금'], index=0)
         target_mode = st.radio("목표 수립 기조", ['평시 (8.5~9.0건)', '이슈/보수적 (6.0~7.2건)', '월말/공격적 (9.5건↑)'], index=1 if day_option=='월' else 0)
         op_mode = st.selectbox("운영 전략", ['일반', '상품증대', '효율화'])
 
         st.header("2. 목표 수립")
         active_member = st.number_input("금일 활동 인원", value=359)
-        col_t1, col_t2 = st.columns(2)
-        with col_t1: target_bojang = st.number_input("🎯 보장 목표", value=500)
-        with col_t2: target_product = st.number_input("🎯 상품 목표", value=3100)
-        target_total_advertiser = target_bojang + target_product
-        
-        sa_est_18 = st.number_input("SA 예상 (18시)", value=1000)
-        da_add_target = st.number_input("DA 추가 버퍼", value=50)
+        da_target_18 = st.number_input("DA 전체 목표", value=3600)
+        start_resource_10 = st.number_input("10시 시작 자원", value=1100)
 
-        st.header("3. [자동] 10시 시작 자원")
-        with st.expander("📂 파일 업로드 (어제+오늘)"):
-            file_yest_24 = st.file_uploader("어제 24시 마감 파일", key="v6_f1")
-            file_today_10 = st.file_uploader("오늘 10시 현재 파일", key="v6_f2")
-            reported_yest_18 = st.number_input("어제 18시 보고된 총량", value=3000)
-
-        start_resource_10 = 1100
-        if file_yest_24 and file_today_10:
-            df_y24 = parse_uploaded_files([file_yest_24])
-            df_t10 = parse_uploaded_files([file_today_10])
-            cnt_y24 = int(df_y24.iloc[:, 1].sum()) if not df_y24.empty else 0
-            cnt_t10 = int(df_t10.iloc[:, 1].sum()) if not df_t10.empty else 0
-            calc_start = (cnt_y24 - reported_yest_18) + cnt_t10
-            if calc_start > 0: start_resource_10 = calc_start
-        start_resource_10 = st.number_input("10시 시작 자원 (최종)", value=start_resource_10)
-
-        st.header("4. [자동] 실시간 분석")
-        uploaded_realtime = st.file_uploader("📊 실시간 로우데이터", accept_multiple_files=True, key="v6_real")
+        st.header("3. 현황 입력")
+        current_total = st.number_input("현재 총 자원", value=2000)
+        current_bojang = st.number_input("ㄴ 보장분석", value=1600)
+        current_prod = st.number_input("ㄴ 상품자원", value=400)
         
-        real_data = analyze_data(parse_uploaded_files(uploaded_realtime) if uploaded_realtime else pd.DataFrame())
-        
-        if uploaded_realtime:
-            st.success(f"실적 집계 완료 ({real_data['total_cnt']:,}건)")
-            def_total = real_data['total_cnt']
-            def_bojang = real_data['bojang_cnt']
-            def_prod = real_data['prod_cnt']
-            def_cost_da = real_data['da_cost'] # V6.6은 DA만 자동이었음
-        else:
-            def_total, def_bojang, def_prod = 1963, 1600, 363
-            def_cost_da = 23560000
-
-        current_total = st.number_input("현재 총 자원", value=def_total)
-        current_bojang = st.number_input("ㄴ 보장분석", value=def_bojang)
-        current_prod = st.number_input("ㄴ 상품자원", value=def_prod)
-        
-        cost_da = st.number_input("DA 소진액 (자동)", value=def_cost_da)
-        if uploaded_realtime: st.warning("👇 제휴 소진액을 직접 입력해주세요!")
-        cost_aff = st.number_input("제휴 소진액 (수기)", value=11270000)
+        cost_da = st.number_input("DA 소진액", value=23000000)
+        cost_aff = st.number_input("제휴 소진액", value=11000000)
         cost_total = cost_da + cost_aff
 
-        st.header("5. 기타 설정")
+        st.header("4. 기타 설정")
         tom_member = st.number_input("명일 활동 인원", value=350)
-        tom_sa_9 = st.number_input("명일 SA 9시 예상", value=410)
+        tom_sa_9 = st.number_input("명일 SA 9시", value=410)
         tom_dawn_ad = st.checkbox("내일 새벽 고정광고 있음", value=False)
-        fixed_ad_type = st.radio("발송 시간", ["없음", "12시 Only", "14시 Only", "12시+14시 Both"], index=2)
+        fixed_ad_type = st.radio("발송 시간", ["없음", "12시", "14시", "Both"], index=2)
         fixed_content = st.text_input("내용", value="14시 카카오페이 TMS 발송 예정입니다")
 
-    # --- V6.6 로직 ---
+    # --- V6.6 로직 (에러 수정됨) ---
     w = {'월': 0.82, '화': 1.0, '수': 1.0, '목': 0.95, '금': 0.85}.get(day_option, 1.0)
     if fixed_ad_type != "없음" and day_option == '월': w = 0.90
     
     mul_14 = 1.215 if "12시" in fixed_ad_type else 1.35 * w
     mul_16 = 1.099
 
-    da_target_18 = target_total_advertiser - sa_est_18 + da_add_target
+    # [FIX] 비율 결정 로직 추가
+    if op_mode == '상품증대': ratio_ba = 0.16 
+    elif op_mode == '효율화': ratio_ba = 0.12
+    else: ratio_ba = 0.102
+
+    # [FIX] 목표 배분 변수 정의 추가
+    da_target_bojang = int(da_target_18 * ratio_ba)
+    da_target_prod = da_target_18 - da_target_bojang
+    
     da_per_18 = round(da_target_18 / active_member, 1)
     
+    # 17시 목표
     gap_percent = 0.040 if fixed_ad_type == "없음" else 0.032
     da_target_17 = da_target_18 - round(da_target_18 * gap_percent)
     da_per_17 = round(da_target_17 / active_member, 1)
@@ -210,15 +180,9 @@ def run_v6_6_legacy():
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
-    if uploaded_realtime and real_data['total_cnt'] > 0:
-        ratio_ba = real_data['ratio_ba']
-    else:
-        if op_mode == '상품증대': ratio_ba = 0.16 
-        elif op_mode == '효율화': ratio_ba = 0.12
-        else: ratio_ba = 0.102
-
-    est_ba_18_14 = round(est_18_from_14 * ratio_ba) 
-    est_prod_18_14 = round(est_18_from_14 * (1-ratio_ba))
+    # [FIX] 예상 배분 변수 정의 추가
+    est_ba_18_14 = int(est_18_from_14 * ratio_ba)
+    est_prod_18_14 = est_18_from_14 - est_ba_18_14
 
     cpa_da = round(cost_da / current_bojang / 10000, 1) if current_bojang else 0
     cpa_aff = round(cost_aff / current_prod / 10000, 1) if current_prod else 0
@@ -234,20 +198,6 @@ def run_v6_6_legacy():
     msg_14 = "금일 고정구좌 이슈없이 집행중이며, 전체 수량 또한 양사 합산 시 소폭 초과 달성할 것으로 보입니다." if est_18_from_14 >= da_target_18 else "오전 목표 대비 소폭 부족할 것으로 예상되나, 남은 시간 상품자원/보장분석 Push 운영하겠습니다."
     msg_16 = "* 보장분석 자원 넉넉할 것으로 보여 DA배너 일부 축소하여 비용 절감하겠습니다." if current_total + remaining_gap >= da_target_18 else "* 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."
 
-    dash_14, dash_16 = pd.DataFrame(), pd.DataFrame()
-    if not real_data['media_stats'].empty:
-        d_raw = real_data['media_stats'].copy()
-        for col in d_raw.columns:
-            if '현재' in col and '비용' not in col:
-                d_raw[col.replace('현재', '예상')] = (d_raw[col] * mul_14).astype(int)
-        dash_14 = d_raw[sorted(d_raw.columns.tolist())]
-
-        d_raw16 = real_data['media_stats'].copy()
-        for col in d_raw16.columns:
-            if '현재' in col and '비용' not in col:
-                d_raw16[col.replace('현재', '예상')] = (d_raw16[col] * mul_16).astype(int)
-        dash_16 = d_raw16[sorted(d_raw16.columns.tolist())]
-
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
@@ -255,7 +205,7 @@ def run_v6_6_legacy():
     tom_da_req = tom_total_target - tom_sa_9
     tom_per_msg = 5.0 if tom_dawn_ad else 4.4
 
-    # --- 탭 출력 (V6.6 스타일 복원) ---
+    # --- 탭 출력 ---
     tab1, tab2, tab3, tab4 = st.tabs(["🌅 09:30 목표", "🔥 14:00 중간", "⚠️ 16:00 마감", "🌙 18:00 퇴근"])
 
     with tab1:
@@ -276,7 +226,7 @@ def run_v6_6_legacy():
 * {fixed_msg}{issue_text}"""
         st.text_area("복사 텍스트:", report_morning, height=300)
         
-        # [복원] 시간대별 계획표 (하단 배치)
+        # 표 복원
         st.markdown("#### 📉 시간대별 배분 계획표")
         hours = ["10시", "11시", "12시", "13시", "14시", "15시", "16시", "17시", "18시"]
         weights = [0, 0.11, 0.18, 0.15, 0.11, 0.16, 0.10, 0.10, 0.09] 
@@ -306,14 +256,7 @@ def run_v6_6_legacy():
         st.pyplot(fig)
 
     with tab2:
-        st.subheader("🔥 14:00 중간 보고 & 대시보드")
-        if not dash_14.empty:
-            st.markdown("#### 📊 매체별 예상 성과 (Live Dashboard)")
-            hl_cols = [c for c in dash_14.columns if '예상' in c]
-            st.dataframe(dash_14.style.background_gradient(cmap='Blues', subset=hl_cols).format("{:,}"), use_container_width=True)
-        elif uploaded_realtime: st.error("데이터 로드 실패")
-        else: st.info("📂 로우데이터 업로드 시 매체별 상세 예측이 표시됩니다.")
-
+        st.subheader("🔥 14:00 중간 보고")
         report_1400 = f"""DA파트 금일 14시간 현황 전달드립니다.
 
 금일 목표(18시 기준) : 인당배분 {da_per_18:.1f}건 / 총 {da_target_18:,}건
@@ -339,11 +282,6 @@ def run_v6_6_legacy():
 
     with tab3:
         st.subheader("⚠️ 16:00 마감 임박 보고")
-        if not dash_16.empty:
-            st.markdown("#### 📊 매체별 운영 현황 (16시 기준 예상)")
-            hl_cols = [c for c in dash_16.columns if '예상' in c]
-            st.dataframe(dash_16.style.background_gradient(cmap='Greens', subset=hl_cols).format("{:,}"), use_container_width=True)
-
         report_1600 = f"""DA파트 금일 16시간 현황 전달드립니다.
 
 금일 목표(18시 기준) : 총 {da_target_18:,}건
