@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import platform
+import io
 
 # -----------------------------------------------------------
 # 0. 공통 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="메리츠 보고 자동화 V15.0", layout="wide")
+st.set_page_config(page_title="메리츠 보고 자동화 V15.1", layout="wide")
 
 @st.cache_resource
 def set_korean_font():
@@ -23,34 +24,103 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수
+# 1. 유틸리티 함수 (스마트 파서 업데이트)
 # -----------------------------------------------------------
 def parse_uploaded_files(files):
     combined_df = pd.DataFrame()
-    for file in files:
-        try:
-            if file.name.endswith('.csv'):
-                try: df = pd.read_csv(file, encoding='utf-8-sig')
-                except: df = pd.read_csv(file, encoding='cp949')
-            else:
-                df = pd.read_excel(file)
-            
-            cols = df.columns.tolist()
-            col_cost = next((c for c in cols if any(x in c for x in ['비용', '소진', 'Cost', '금액'])), None)
-            col_cnt = next((c for c in cols if any(x in c for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
-            col_camp = next((c for c in cols if any(x in c for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
-            col_type = next((c for c in cols if any(x in c for x in ['구분', 'type'])), None)
+    
+    # 우리가 찾고 싶은 핵심 키워드 (헤더 찾기용)
+    target_cols = ['비용', '소진', 'Cost', '금액', '캠페인', 'Campaign', '광고명', '매체']
 
-            if col_cost and col_cnt:
-                temp = pd.DataFrame()
-                temp['cost'] = df[col_cost].fillna(0)
-                temp['count'] = df[col_cnt].fillna(0)
-                temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
-                if col_type: temp['type'] = df[col_type].fillna('')
-                else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
-                combined_df = pd.concat([combined_df, temp], ignore_index=True)
+    for file in files:
+        df = None
+        try:
+            # A. CSV 파일 처리 (탭/쉼표/인코딩/헤더위치 자동 탐지)
+            if file.name.endswith('.csv'):
+                # 1단계: 인코딩 & 구분자 조합 시도
+                encodings = ['utf-8-sig', 'cp949', 'euc-kr']
+                separators = [',', '\t']
+                
+                for enc in encodings:
+                    if df is not None: break
+                    for sep in separators:
+                        try:
+                            file.seek(0)
+                            # 일단 읽어보기
+                            temp_df = pd.read_csv(file, encoding=enc, sep=sep)
+                            
+                            # 데이터가 1열 이상이고, 우리가 아는 키워드가 하나라도 있으면 성공
+                            if len(temp_df.columns) > 1:
+                                # 헤더가 첫 줄에 없을 수도 있으니 확인
+                                is_valid = False
+                                # 컬럼명 자체에 키워드가 있는지
+                                if any(k in str(c) for c in temp_df.columns for k in target_cols):
+                                    df = temp_df
+                                    break
+                                # 아니라면 상위 10줄 안에 키워드가 있는지 확인 (Metadata skip)
+                                else:
+                                    for i in range(10):
+                                        if i >= len(temp_df): break
+                                        row_vals = temp_df.iloc[i].astype(str).values
+                                        if any(k in v for v in row_vals for k in target_cols):
+                                            # i+1 번째 줄이 헤더임. 다시 읽기
+                                            file.seek(0)
+                                            df = pd.read_csv(file, encoding=enc, sep=sep, header=i+1)
+                                            break
+                                    if df is not None: break
+                        except: continue
+
+            # B. 엑셀 파일 처리
+            else:
+                try:
+                    # openpyxl 엔진 시도
+                    df = pd.read_excel(file)
+                except Exception as e:
+                    # 엔진 없을 경우 기본값 시도 또는 경고
+                    st.warning(f"⚠️ '{file.name}' 읽기 실패. (openpyxl 라이브러리 설치 권장)")
+                    continue
+                
+                # 엑셀도 상단에 이상한 제목이 있을 수 있으니 헤더 찾기
+                if df is not None:
+                    # 컬럼에 키워드 없으면 아래로 훑기
+                    if not any(k in str(c) for c in df.columns for k in target_cols):
+                        for i in range(10):
+                            if i >= len(df): break
+                            # i번째 행을 확인
+                            row_vals = df.iloc[i].astype(str).values
+                            if any(k in v for v in row_vals for k in target_cols):
+                                df.columns = df.iloc[i] # 컬럼명 덮어쓰기
+                                df = df.iloc[i+1:].reset_index(drop=True) # 데이터 자르기
+                                break
+
+            # C. 데이터 병합
+            if df is not None:
+                # 컬럼명 정규화 (공백 제거 등)
+                df.columns = [str(c).strip() for c in df.columns]
+                cols = df.columns.tolist()
+                
+                # 필요한 컬럼 찾기
+                col_cost = next((c for c in cols if any(x in c for x in ['비용', '소진', 'Cost', '금액'])), None)
+                col_cnt = next((c for c in cols if any(x in c for x in ['전환', '수량', 'DB', '건수', 'Cnt', '배분'])), None)
+                col_camp = next((c for c in cols if any(x in c for x in ['캠페인', '광고명', '매체', '그룹', 'account'])), None)
+                col_type = next((c for c in cols if any(x in c for x in ['구분', 'type'])), None)
+
+                if col_cost and col_cnt:
+                    temp = pd.DataFrame()
+                    # 문자열로 된 숫자 처리 (예: "1,000" -> 1000)
+                    temp['cost'] = df[col_cost].astype(str).str.replace(',', '').str.replace('"', '').replace('', '0').astype(float).fillna(0)
+                    temp['count'] = df[col_cnt].astype(str).str.replace(',', '').str.replace('"', '').replace('', '0').astype(float).fillna(0)
+                    
+                    temp['campaign'] = df[col_camp].fillna('기타') if col_camp else '기타'
+                    if col_type: temp['type'] = df[col_type].fillna('')
+                    else: temp['type'] = temp['campaign'].apply(lambda x: '보장' if '보장' in str(x) else '상품')
+                    combined_df = pd.concat([combined_df, temp], ignore_index=True)
+                else:
+                    pass # 필수 컬럼 없으면 스킵
+                    
         except Exception as e:
-            st.error(f"파일 읽기 오류 ({file.name}): {e}")
+            st.error(f"❌ 파일 처리 중 치명적 오류 ({file.name}): {e}")
+
     return combined_df
 
 def analyze_data(df, aff_to_bojang=False):
@@ -189,7 +259,7 @@ def run_v6_6_legacy():
     base_multiplier = 3.15
     tom_base_total = int(tom_member * base_multiplier)
     ad_boost = 300 if tom_dawn_ad else 0
-    tom_total_target = tom_base_total + ad_boost 
+    tom_total_target = tom_base_total + ad_boost
     tom_da_req = tom_total_target - tom_sa_9
     tom_per_msg = 5.0 if tom_dawn_ad else 4.4
     ad_msg = "\n* 명일 새벽 고정광고(CPT/풀뷰) 집행 예정으로 자원 추가 확보 예상됩니다." if tom_dawn_ad else ""
@@ -287,11 +357,11 @@ def run_v6_6_legacy():
 
 
 # -----------------------------------------------------------
-# MODE 2: V15.0 (Advanced - Final Verification & Updates)
+# MODE 2: V15.1 (Advanced - Smart Parser)
 # -----------------------------------------------------------
 def run_v15_0_advanced():
-    st.title("📊 메리츠화재 DA 통합 시스템 (V15.0 Final)")
-    st.markdown("🚀 **요일별 가중치 보정 & 부스팅 & 수기 제휴관리**")
+    st.title("📊 메리츠화재 DA 통합 시스템 (V15.1 Final)")
+    st.markdown("🚀 **스마트 파일 파서 & 요일별 보정 & 부스팅**")
 
     with st.sidebar:
         st.header("1. 기본 설정")
@@ -301,7 +371,6 @@ def run_v15_0_advanced():
             value="14:00"
         )
         
-        # [NEW] 16시 이후 부스팅 버튼 활성화
         is_boosting = False
         if current_time_str in ["16:00", "17:00"]:
             is_boosting = st.checkbox("🔥 긴급 부스팅 적용 (막판 스퍼트)", value=False)
@@ -343,7 +412,7 @@ def run_v15_0_advanced():
         start_resource_10 = st.number_input("[자동] 10시 시작 자원", value=start_resource_10)
 
         st.header("4. [자동+수기] 실시간 분석")
-        uploaded_realtime = st.file_uploader("📊 실시간 로우데이터", accept_multiple_files=True)
+        uploaded_realtime = st.file_uploader("📊 실시간 로우데이터 (탭 구분 파일 자동 인식)", accept_multiple_files=True)
         is_aff_bojang = st.checkbox("☑️ 금일 제휴는 '보장' 위주", value=False)
         
         real_data = analyze_data(parse_uploaded_files(uploaded_realtime) if uploaded_realtime else pd.DataFrame(), aff_to_bojang=is_aff_bojang)
@@ -351,19 +420,17 @@ def run_v15_0_advanced():
         if uploaded_realtime:
             st.info(f"💡 파일 기반 비율 적용 중 (보장 {int(real_data['ratio_ba']*100)}%)")
             ratio_ba = real_data['ratio_ba']
-            # 파일 데이터 적용
             current_da_cnt = real_data['da_cnt']
             cost_da = real_data['da_cost']
             current_aff_cnt = real_data['aff_cnt']
-            cost_aff = int(real_data['total_cost'] - cost_da) # 근사치
-            cpa_aff_input = 0 # 파일 모드에선 자동 계산
+            cost_aff = int(real_data['total_cost'] - cost_da) 
+            cpa_aff_input = 0
         else:
             st.caption("📂 파일 없음: 수기 입력 모드")
             if op_mode_select == '상품증대': ratio_ba = 0.84
             elif op_mode_select == '효율화': ratio_ba = 0.88
             else: ratio_ba = 0.898
             
-            # [NEW] 수기 입력 디테일 강화
             st.markdown("##### 🅰️ DA (배너광고)")
             current_da_cnt = st.number_input("DA 실적 (건수)", value=1500)
             cost_da = st.number_input("DA 소진액 (원)", value=23000000)
@@ -372,19 +439,14 @@ def run_v15_0_advanced():
             cost_aff = st.number_input("제휴 소진액 (원)", value=11270000)
             cpa_aff_input = st.number_input("제휴 단가 (CPA)", value=14000, step=100)
             current_aff_cnt = int(cost_aff / cpa_aff_input) if cpa_aff_input > 0 else 0
-            
             st.info(f"🧮 제휴 실적 자동 계산: **{current_aff_cnt:,}건**")
 
         ratio_prod = 1 - ratio_ba
         
-        # 합산 로직
         current_total = current_da_cnt + current_aff_cnt
         cost_total = cost_da + cost_aff
         
-        # 보장/상품 배분 로직 (제휴 보장 체크 시)
         if is_aff_bojang:
-            # 제휴는 무조건 보장, DA는 비율대로? -> V14 방식 유지 (전체 비율 적용)
-            # 이유: 보통 제휴가 보장이면 DA도 보장 효율이 같이 오르는 경향
             current_bojang = int(current_total * ratio_ba)
         else:
             current_bojang = int(current_total * ratio_ba)
@@ -399,15 +461,14 @@ def run_v15_0_advanced():
         fixed_content = st.text_input("내용", value="14시 카카오페이 TMS 발송 예정입니다")
 
     # --- 로직 ---
-    # [NEW] 14시 예측 배수 요일별 보정 (월요일 페널티)
     base_mul_14 = 1.35
     if day_option == '월': 
         base_mul_14 = 1.15
     elif fixed_ad_type != "없음": 
-        base_mul_14 = 1.215 # 고정광고 있는 날 (화수목)
+        base_mul_14 = 1.215 
         
     mul_14 = base_mul_14
-    mul_16 = 1.25 if is_boosting else 1.10 # [NEW] 부스팅 반영
+    mul_16 = 1.25 if is_boosting else 1.10
 
     da_target_bojang = target_bojang - sa_est_bojang
     da_target_prod = target_product - sa_est_prod + da_add_target
@@ -418,7 +479,6 @@ def run_v15_0_advanced():
     da_per_17 = round(da_target_17 / active_member, 1)
 
     est_18_from_14 = int(current_total * mul_14)
-    # Range limit
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
@@ -443,12 +503,11 @@ def run_v15_0_advanced():
     else:
         msg_16 = "* 마감 전까지 배너광고 및 제휴 매체 최대한 활용하여 자원 확보하겠습니다."
     
-    # [NEW] Time Multipliers (월요일 등 반영)
     time_multipliers = {
         "09:30": 1.0, 
         "10:00": 1.75, "11:00": 1.65, "12:00": 1.55, "13:00": 1.45,
         "14:00": mul_14,
-        "15:00": (mul_14 + mul_16) / 2, # 평균값
+        "15:00": (mul_14 + mul_16) / 2, 
         "16:00": mul_16, 
         "17:00": 1.05 if not is_boosting else 1.15, 
         "18:00": 1.0
@@ -635,10 +694,10 @@ def main():
     st.sidebar.title("⚙️ 시스템 버전 선택")
     version = st.sidebar.selectbox(
         "사용할 버전을 선택하세요:",
-        ["V15.0 (Final)", "V6.6 (Legacy)"]
+        ["V15.1 (Final)", "V6.6 (Legacy)"]
     )
     
-    if version == "V15.0 (Final)":
+    if version == "V15.1 (Final)":
         run_v15_0_advanced()
     else:
         run_v6_6_legacy()
