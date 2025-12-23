@@ -28,7 +28,7 @@ def set_korean_font():
 set_korean_font()
 
 # -----------------------------------------------------------
-# 1. 유틸리티 함수 (Updated Logic)
+# 1. 유틸리티 함수 (Updated: 스마트 파일 리더)
 # -----------------------------------------------------------
 def clean_num(x):
     """문자열 숫자를 실수형으로 변환 (쉼표 제거 강화)"""
@@ -36,6 +36,7 @@ def clean_num(x):
         return 0.0
     try:
         if isinstance(x, str):
+            # 쉼표, 따옴표, 공백 제거
             return float(x.replace(',', '').replace('"', '').replace("'", "").strip())
         return float(x)
     except:
@@ -71,9 +72,40 @@ def get_media_from_plab(row):
 
     return '기타'
 
+def read_file_safe(file, file_type='csv', **kwargs):
+    """
+    [Fix] 인코딩 자동 감지 및 엑셀/CSV 자동 분기 처리
+    """
+    file.seek(0)
+    filename = file.name.lower()
+
+    # 1. 엑셀 파일 (.xlsx, .xls) 처리
+    if filename.endswith(('.xlsx', '.xls')):
+        try:
+            return pd.read_excel(file, engine='openpyxl', **kwargs)
+        except Exception as e:
+            # 엑셀 읽기 실패 시 에러 반환하지 않고 None 처리 (로그는 외부에서)
+            return None
+
+    # 2. CSV 파일 인코딩 순회 (utf-8 -> cp949 -> utf-16)
+    encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-16', 'utf-8-sig']
+    for enc in encodings:
+        try:
+            file.seek(0)
+            # 탭 구분자가 강제된 경우와 아닌 경우 분기
+            if 'sep' in kwargs:
+                df = pd.read_csv(file, encoding=enc, **kwargs)
+            else:
+                df = pd.read_csv(file, encoding=enc) # 기본 쉼표
+            return df
+        except (UnicodeDecodeError, pd.errors.ParserError):
+            continue
+            
+    return None
+
 def parse_files_by_rules(files):
     """
-    [V18.2 Update] 매체별 전용 파서 적용 (탭 구분, 헤더 위치 보정)
+    [V18.2 Update] 매체별 파싱 로직 (인코딩/확장자 에러 해결)
     """
     df_cost = pd.DataFrame() # 비용 데이터
     df_db = pd.DataFrame()   # DB 데이터
@@ -81,99 +113,106 @@ def parse_files_by_rules(files):
     for file in files:
         fname = file.name
         temp = pd.DataFrame()
+        df = None
         
         try:
             # -----------------------------------------------------------
-            # [Rule 1] 토스 (헤더 4번째 줄)
+            # [Rule 1] 토스 (헤더 4번째 줄) - 엑셀일 수도 있음
             # -----------------------------------------------------------
             if "메리츠 화재_전략광고3팀_배너광고_캠페인" in fname:
-                df = pd.read_csv(file, header=3) # Header correction
+                # 엑셀이면 read_excel, CSV면 read_csv (header=3 공통)
+                df = read_file_safe(file, header=3)
                 
-                # 컬럼 매핑 (소진 비용, 캠페인 명)
-                col_cost = next((c for c in df.columns if '소진 비용' in str(c)), None)
-                col_camp = next((c for c in df.columns if '캠페인 명' in str(c)), None)
-                
-                if col_cost and col_camp:
-                    temp['cost'] = df[col_cost].apply(clean_num) * 1.1 # 부가세 1.1
-                    temp['campaign'] = df[col_camp].fillna('')
-                    temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                    temp['media'] = '토스'
-                    df_cost = pd.concat([df_cost, temp], ignore_index=True)
+                if df is not None:
+                    # 컬럼 매핑 (소진 비용, 캠페인 명)
+                    col_cost = next((c for c in df.columns if '소진 비용' in str(c)), None)
+                    col_camp = next((c for c in df.columns if '캠페인 명' in str(c)), None)
+                    
+                    if col_cost and col_camp:
+                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 # 부가세 1.1
+                        temp['campaign'] = df[col_camp].fillna('')
+                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
+                        temp['media'] = '토스'
+                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
 
             # -----------------------------------------------------------
-            # [Rule 2] 카카오 (탭 구분)
+            # [Rule 2] 카카오 (탭 구분) - UTF-16 이슈 해결
             # -----------------------------------------------------------
             elif "메리츠화재다이렉트_캠페인" in fname:
-                df = pd.read_csv(file, sep='\t') # Tab separator
+                df = read_file_safe(file, sep='\t')
                 
-                col_cost = '비용' if '비용' in df.columns else None
-                col_camp = '캠페인' if '캠페인' in df.columns else None
-                
-                if col_cost and col_camp:
-                    temp['cost'] = df[col_cost].apply(clean_num) * 1.1 # 부가세 1.1
-                    temp['campaign'] = df[col_camp].fillna('')
-                    temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                    temp['media'] = '카카오'
-                    df_cost = pd.concat([df_cost, temp], ignore_index=True)
+                if df is not None:
+                    col_cost = '비용' if '비용' in df.columns else None
+                    col_camp = '캠페인' if '캠페인' in df.columns else None
+                    
+                    if col_cost and col_camp:
+                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 # 부가세 1.1
+                        temp['campaign'] = df[col_camp].fillna('')
+                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
+                        temp['media'] = '카카오'
+                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
 
             # -----------------------------------------------------------
             # [Rule 3] 네이버 (일반 CSV)
             # -----------------------------------------------------------
             elif "result" in fname:
-                df = pd.read_csv(file)
+                df = read_file_safe(file) # 기본 쉼표
                 
-                col_cost = next((c for c in df.columns if '총 비용' in str(c)), None)
-                col_camp = next((c for c in df.columns if '캠페인 이름' in str(c)), None)
-                
-                if col_cost and col_camp:
-                    temp['cost'] = df[col_cost].apply(clean_num) # 값 그대로
-                    temp['campaign'] = df[col_camp].fillna('')
-                    temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                    temp['media'] = '네이버'
-                    df_cost = pd.concat([df_cost, temp], ignore_index=True)
+                if df is not None:
+                    col_cost = next((c for c in df.columns if '총 비용' in str(c)), None)
+                    col_camp = next((c for c in df.columns if '캠페인 이름' in str(c)), None)
+                    
+                    if col_cost and col_camp:
+                        temp['cost'] = df[col_cost].apply(clean_num) # 값 그대로
+                        temp['campaign'] = df[col_camp].fillna('')
+                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
+                        temp['media'] = '네이버'
+                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
 
             # -----------------------------------------------------------
-            # [Rule 4] 구글 (탭 구분, 헤더 3번째 줄)
+            # [Rule 4] 구글 (탭 구분, 헤더 3번째 줄) - UTF-16 이슈 해결
             # -----------------------------------------------------------
             elif "캠페인 보고서" in fname:
-                df = pd.read_csv(file, sep='\t', header=2)
-                df.columns = df.columns.str.strip() # 공백 제거
+                df = read_file_safe(file, sep='\t', header=2)
                 
-                col_cost = '비용' if '비용' in df.columns else None
-                col_camp = '캠페인' if '캠페인' in df.columns else None
-                
-                if col_cost and col_camp:
-                    temp['cost'] = df[col_cost].apply(clean_num) * 1.1 * 1.15 # 부가세 * 수수료
-                    temp['campaign'] = df[col_camp].fillna('')
-                    temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                    temp['media'] = '구글'
-                    df_cost = pd.concat([df_cost, temp], ignore_index=True)
+                if df is not None:
+                    df.columns = df.columns.str.strip() # 공백 제거
+                    col_cost = '비용' if '비용' in df.columns else None
+                    col_camp = '캠페인' if '캠페인' in df.columns else None
+                    
+                    if col_cost and col_camp:
+                        temp['cost'] = df[col_cost].apply(clean_num) * 1.1 * 1.15 # 부가세 * 수수료
+                        temp['campaign'] = df[col_camp].fillna('')
+                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
+                        temp['media'] = '구글'
+                        df_cost = pd.concat([df_cost, temp], ignore_index=True)
 
             # -----------------------------------------------------------
-            # [Rule 5] 피랩 (DB 마스터)
+            # [Rule 5] 피랩 (DB 마스터) - 엑셀일 가능성 높음
             # -----------------------------------------------------------
             elif "Performance Lab" in fname:
-                df = pd.read_csv(file)
+                df = read_file_safe(file) # 엑셀/CSV 자동 판별
                 
-                col_send = next((c for c in df.columns if 'METIS전송' in str(c) and '율' not in str(c)), None)
-                col_fail = next((c for c in df.columns if 'METIS실패건수' in str(c)), None)
-                col_re = next((c for c in df.columns if 'METIS재인입건수' in str(c)), None)
-                
-                if col_send:
-                    s = df[col_send].apply(clean_num).fillna(0)
-                    f = df[col_fail].apply(clean_num).fillna(0) if col_fail else 0
-                    r = df[col_re].apply(clean_num).fillna(0) if col_re else 0
+                if df is not None:
+                    col_send = next((c for c in df.columns if 'METIS전송' in str(c) and '율' not in str(c)), None)
+                    col_fail = next((c for c in df.columns if 'METIS실패건수' in str(c)), None)
+                    col_re = next((c for c in df.columns if 'METIS재인입건수' in str(c)), None)
                     
-                    temp['count'] = s - f - r
-                    temp['campaign'] = df['구분'].fillna('')
-                    temp['account'] = df['account'].fillna('') # 매체 매핑용
-                    temp['구분'] = df['구분'].fillna('')       # 매체 매핑용 fallback
-                    temp['type'] = temp['campaign'].apply(classify_type_by_name)
-                    
-                    # [Updated] 매체 정밀 매핑 (DDN, GDN 등)
-                    temp['media'] = temp.apply(get_media_from_plab, axis=1)
-                    
-                    df_db = pd.concat([df_db, temp], ignore_index=True)
+                    if col_send:
+                        s = df[col_send].apply(clean_num).fillna(0)
+                        f = df[col_fail].apply(clean_num).fillna(0) if col_fail else 0
+                        r = df[col_re].apply(clean_num).fillna(0) if col_re else 0
+                        
+                        temp['count'] = s - f - r
+                        temp['campaign'] = df['구분'].fillna('')
+                        temp['account'] = df['account'].fillna('') # 매체 매핑용
+                        temp['구분'] = df['구분'].fillna('')       # 매체 매핑용 fallback
+                        temp['type'] = temp['campaign'].apply(classify_type_by_name)
+                        
+                        # [Updated] 매체 정밀 매핑 (DDN, GDN 등)
+                        temp['media'] = temp.apply(get_media_from_plab, axis=1)
+                        
+                        df_db = pd.concat([df_db, temp], ignore_index=True)
                     
         except Exception as e:
             st.error(f"❌ 파일 처리 중 오류 발생: {fname} / {e}")
@@ -337,7 +376,6 @@ def run_v18_2_master():
     mul_16 = 1.25 if is_boosting else 1.10
 
     est_18_from_14 = int(current_total * mul_14)
-    # Range limit
     if est_18_from_14 > da_target_18 + 250: est_18_from_14 = da_target_18 + 150
     elif est_18_from_14 < da_target_18 - 250: est_18_from_14 = da_target_18 - 150
 
@@ -348,7 +386,15 @@ def run_v18_2_master():
     cpa_aff = round(res['aff_cost'] / res['aff_cnt'] / 10000, 1) if res['aff_cnt'] > 0 else 0
     cpa_total = round(cost_total / current_total / 10000, 1) if current_total > 0 else 0
 
-    fixed_msg = f"금일 {fixed_content}." if fixed_ad_type != "없음" else "금일 특이사항 없이 운영 중이며,"
+    # [Fix] 코멘트 끊김 방지 로직 수정
+    if fixed_ad_type != "없음":
+        if fixed_content.strip():
+            fixed_msg = f"금일 {fixed_content}."
+        else:
+            fixed_msg = "금일 특이사항 없이 운영 중이며," # 내용이 비었을 때 기본 멘트
+    else:
+        fixed_msg = "금일 특이사항 없이 운영 중이며,"
+
     msg_14 = "금일 고정구좌 이슈없이 집행중이며..." if est_18_from_14 >= da_target_18 else "오전 목표 대비 소폭 부족할 것으로 예상되나, 남은 시간 집중 관리하겠습니다."
     
     time_multipliers = {
@@ -395,13 +441,10 @@ def run_v18_2_master():
         with col_d2:
             st.markdown("##### 📌 매체별 실적 상세")
             if not res['media_stats'].empty:
-                # 합계 행 추가
                 display_stats = res['media_stats'].copy()
                 display_stats.loc['합계'] = display_stats.sum(numeric_only=True)
-                # CPA 재계산
                 display_stats.loc['합계', 'CPA'] = display_stats.loc['합계', 'Cost'] / display_stats.loc['합계', 'Total_Cnt'] if display_stats.loc['합계', 'Total_Cnt'] > 0 else 0
                 
-                # 포맷팅
                 st.dataframe(display_stats[['Bojang_Cnt', 'Prod_Cnt', 'Cost', 'CPA']].style.format("{:,.0f}"), use_container_width=True)
             else:
                 st.info("데이터가 없습니다.")
